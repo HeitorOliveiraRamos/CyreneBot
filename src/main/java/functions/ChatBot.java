@@ -1,8 +1,8 @@
 package functions;
 
+import conexao.ConnectionOllama;
 import conexao.Messages;
-import main.Configuration;
-import main.Util;
+import main.Configuration; // Assuming Configuration.PERSONALITY might be used, though ConnectionOllama handles it
 import net.dv8tion.jda.api.entities.Message;
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
 import net.dv8tion.jda.api.hooks.ListenerAdapter;
@@ -34,13 +34,13 @@ public class ChatBot extends ListenerAdapter {
                 this.userChatSessions.put(userId, true);
                 currentUserAIHistory.clear();
 
-                if (Configuration.PERSONALITY != null && !Configuration.PERSONALITY.isEmpty()) {
-                    final JSONObject systemMessage = new JSONObject();
-                    systemMessage.put("role", "system");
-                    systemMessage.put("content", Configuration.PERSONALITY);
-                    currentUserAIHistory.put(systemMessage);
-                }
-                message.reply("Olá! Sobre o que iremos conversar hoje?").queue();
+                String openingLine = "Olá! Sobre o que iremos conversar hoje?";
+                message.reply(openingLine).queue();
+
+                final JSONObject assistantOpeningMessage = new JSONObject();
+                assistantOpeningMessage.put("role", "assistant");
+                assistantOpeningMessage.put("content", openingLine);
+                currentUserAIHistory.put(assistantOpeningMessage);
             }
         } else {
             if (content.equalsIgnoreCase("encerrar conversa")) {
@@ -49,6 +49,18 @@ public class ChatBot extends ListenerAdapter {
                 currentUserAIHistory.clear();
             } else {
                 final String aiResponse = Messages.sendMessageWithHistory(content, currentUserAIHistory);
+
+                final JSONObject userMessageEntry = new JSONObject();
+                userMessageEntry.put("role", "user");
+                userMessageEntry.put("content", content);
+                currentUserAIHistory.put(userMessageEntry);
+
+                if (!aiResponse.startsWith(ConnectionOllama.MESSAGE_ERROR)) {
+                    final JSONObject assistantMessageEntry = new JSONObject();
+                    assistantMessageEntry.put("role", "assistant");
+                    assistantMessageEntry.put("content", aiResponse);
+                    currentUserAIHistory.put(assistantMessageEntry);
+                }
 
                 Messages.sendLongMessageReply(message, aiResponse);
             }
