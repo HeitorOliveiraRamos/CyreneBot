@@ -4,8 +4,6 @@ import conexao.Messages;
 import net.dv8tion.jda.api.entities.UserSnowflake;
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
 import net.dv8tion.jda.api.hooks.ListenerAdapter;
-import org.json.JSONArray;
-import org.json.JSONObject;
 
 import java.time.Duration;
 import java.util.HashMap;
@@ -14,7 +12,7 @@ import java.util.Map;
 public class ModerationAI extends ListenerAdapter {
 
     private static final int MAX_WARNINGS = 3;
-    private static final Duration TIMEOUT_DURATION = Duration.ofMinutes(10);
+    private static final Duration TIMEOUT_DURATION = Duration.ofMinutes(15);
     private static final String MODERATION_SYSTEM_PROMPT = "You are a villain – a truly wicked character, an enemy, someone who spreads chaos. However, you have limits. Read the user's message and determine if it exceeds those limits. You don’t respond to lengthy text or spam; you’ll only respond with something other than 'false' when the message is exceptionally disturbing. Respond with 'true' only when the user's statement goes far beyond any reasonable limit. Otherwise, respond with ‘false’. Just say ‘true’ or ‘false’, nothing more.";
     private final Map<String, Integer> userWarnings = new HashMap<>();
 
@@ -61,14 +59,7 @@ public class ModerationAI extends ListenerAdapter {
     }
 
     private boolean checkMessageWithAI(String messageContent) {
-        final JSONArray tempConversationHistory = new JSONArray();
-
-        final JSONObject systemMessage = new JSONObject();
-        systemMessage.put("role", "system");
-        systemMessage.put("content", MODERATION_SYSTEM_PROMPT);
-        tempConversationHistory.put(systemMessage);
-
-        final String aiResponse = Messages.sendMessageWithHistory(messageContent.toLowerCase(), tempConversationHistory);
+        final String aiResponse = Messages.sendMessageWithPersonality(messageContent.toLowerCase(), null, MODERATION_SYSTEM_PROMPT);
 
         if (aiResponse.trim().equalsIgnoreCase("true")) {
             return true;
