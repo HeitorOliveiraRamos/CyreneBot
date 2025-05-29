@@ -34,7 +34,7 @@ public class ChatBot extends ListenerAdapter {
                 this.userChatSessions.put(userId, true);
                 currentUserAIHistory.clear();
 
-                String openingLine = "Olá! Sobre o que iremos conversar hoje?";
+                final String openingLine = "Olá! Sobre o que iremos conversar hoje?";
                 message.reply(openingLine).queue();
 
                 final JSONObject assistantOpeningMessage = new JSONObject();
