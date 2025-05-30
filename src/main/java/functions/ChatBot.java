@@ -2,7 +2,6 @@ package functions;
 
 import conexao.ConnectionOllama;
 import conexao.Messages;
-import main.Configuration; // Assuming Configuration.PERSONALITY might be used, though ConnectionOllama handles it
 import net.dv8tion.jda.api.entities.Message;
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
 import net.dv8tion.jda.api.hooks.ListenerAdapter;
@@ -24,14 +23,16 @@ public class ChatBot extends ListenerAdapter {
 
         final Message message = event.getMessage();
         final String userId = message.getAuthor().getId();
+        final String channelId = message.getChannel().getId();
+        final String sessionKey = userId + "-" + channelId;
         final String content = message.getContentRaw();
 
-        final boolean isInCurrentUserSession = this.userChatSessions.getOrDefault(userId, false);
-        final JSONArray currentUserAIHistory = this.userAIConversationHistories.computeIfAbsent(userId, k -> new JSONArray());
+        final boolean isInCurrentUserSession = this.userChatSessions.getOrDefault(sessionKey, false);
+        final JSONArray currentUserAIHistory = this.userAIConversationHistories.computeIfAbsent(sessionKey, k -> new JSONArray());
 
         if (!isInCurrentUserSession) {
             if (content.equalsIgnoreCase("vamos conversar")) {
-                this.userChatSessions.put(userId, true);
+                this.userChatSessions.put(sessionKey, true);
                 currentUserAIHistory.clear();
 
                 final String openingLine = "Olá! Sobre o que iremos conversar hoje?";
@@ -44,7 +45,7 @@ public class ChatBot extends ListenerAdapter {
             }
         } else {
             if (content.equalsIgnoreCase("encerrar conversa")) {
-                this.userChatSessions.put(userId, false);
+                this.userChatSessions.put(sessionKey, false);
                 message.reply("Até mais!").queue();
                 currentUserAIHistory.clear();
             } else {
