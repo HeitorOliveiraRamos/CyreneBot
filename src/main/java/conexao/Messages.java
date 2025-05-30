@@ -84,11 +84,37 @@ public class Messages {
      */
     private static List<String> splitMessage(String message) {
         final List<String> parts = new ArrayList<>();
+        final String ellipsis = "[...]";
         int index = 0;
+
         while (index < message.length()) {
-            parts.add(message.substring(index, Math.min(index + MAX_MESSAGE_LENGTH, message.length())));
-            index += MAX_MESSAGE_LENGTH;
+            int remaining = message.length() - index;
+            int maxPartLength = (remaining > MAX_MESSAGE_LENGTH) ? MAX_MESSAGE_LENGTH - ellipsis.length() : MAX_MESSAGE_LENGTH;
+
+            int end = index + maxPartLength;
+            if (end < message.length()) {
+                int lastSpace = message.lastIndexOf(' ', end);
+                if (lastSpace > index) {
+                    end = lastSpace;
+                }
+            } else {
+                end = Math.min(end, message.length());
+            }
+
+            String part = message.substring(index, end).trim();
+            index = end;
+
+            if (index < message.length()) {
+                part += ellipsis;
+                while (index < message.length() && message.charAt(index) == ' ') {
+                    index++;
+                }
+            }
+
+            parts.add(part);
         }
+
         return parts;
     }
+
 }
