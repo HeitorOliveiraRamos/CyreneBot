@@ -16,7 +16,7 @@ public class Main extends ListenerAdapter {
 
         builder.addEventListeners(new ChatBot());
         builder.addEventListeners(new ReplyAI());
-//        builder.addEventListeners(new ModerationAI());
+//        builder.addEventListeners(new ModerationAI()); // Comentado pois a moderação não está muito boa ainda
         builder.addEventListeners(new ClearPrivateChannel());
 
         builder.build().updateCommands().addCommands(Commands.slash("limpar", "Limpa as mensagens do bot no canal privado").addOption(OptionType.INTEGER, "quantidade", "Quantidade de mensagens a excluir", true)).queue();
