@@ -16,7 +16,7 @@ public class Messages {
      * @return A resposta da IA ou uma mensagem de erro.
      */
     public static String sendMessageWithoutHistory(String userMessageContent) {
-        return ConnectionOllama.sendMessageToOllama(userMessageContent, null, null);
+        return ConnectionOllama.sendMessageToOllama(userMessageContent, null, null, false);
     }
 
     /**
@@ -27,7 +27,21 @@ public class Messages {
      * @return A resposta da IA ou uma mensagem de erro.
      */
     public static String sendMessageWithHistory(String userMessageContent, JSONArray conversationHistory) {
-        return ConnectionOllama.sendMessageToOllama(userMessageContent, conversationHistory, null);
+        return ConnectionOllama.sendMessageToOllama(userMessageContent, conversationHistory, null, false);
+    }
+
+
+    /**
+     * Envia uma mensagem para a API Ollama com histórico e personalidade.
+     *
+     * @param userMessageContent O conteúdo da mensagem do usuário.
+     * @param conversationHistory O histórico da conversa.
+     * @param personality A personalidade da IA.
+     * @param ignoreDefaultPersonality Se deve ignorar a personalidade padrão configurada.
+     * @return A resposta da IA ou uma mensagem de erro.
+     */
+    public static String sendMessageWithPersonality(String userMessageContent, JSONArray conversationHistory, String personality, boolean ignoreDefaultPersonality) {
+        return ConnectionOllama.sendMessageToOllama(userMessageContent, conversationHistory, personality, ignoreDefaultPersonality);
     }
 
     /**
@@ -39,7 +53,7 @@ public class Messages {
      * @return A resposta da IA ou uma mensagem de erro.
      */
     public static String sendMessageWithPersonality(String userMessageContent, JSONArray conversationHistory, String personality) {
-        return ConnectionOllama.sendMessageToOllama(userMessageContent, conversationHistory, personality);
+        return ConnectionOllama.sendMessageToOllama(userMessageContent, conversationHistory, personality, false);
     }
 
     /**
