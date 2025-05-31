@@ -36,12 +36,12 @@ public class ChatContext extends ListenerAdapter {
                 for (Message message : messages.reversed()) {
                     final JSONObject messageEntry = new JSONObject();
                     messageEntry.put("role", "user");
-                    messageEntry.put("content", message.getAuthor().getName() + ": " + message.getContentRaw());
+                    messageEntry.put("content", message.getAuthor().getName() + (message.getAuthor().isBot() ? "Bot" : "") + ": " + message.getContentRaw());
                     conversationHistory.put(messageEntry);
                 }
 
                 final String systemPersonality = "You are an assistant specialized in summarizing conversations. Analyze the provided message history, where each message already indicates its author. Create a concise summary identifying the participants and the main topics discussed by each one. The summary should be direct and informative, focusing on the conversation flow and the key points addressed.";
-                final String userPromptForAI = "Based on the previous message history, please provide a summary of the conversation's context.";
+                final String userPromptForAI = "Based on the previous message history, please provide a summary of the conversation's context. The summary should highlight the main topics discussed and the participants involved. Never break your personality character.";
 
                 CompletableFuture.supplyAsync(() ->
                                         Messages.sendMessageWithPersonality(userPromptForAI, conversationHistory, systemPersonality, false),
