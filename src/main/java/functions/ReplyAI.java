@@ -51,18 +51,16 @@ public class ReplyAI extends ListenerAdapter {
             final String selfUserId = event.getJDA().getSelfUser().getId();
 
             CompletableFuture.supplyAsync(() -> {
+                final String contentWithoutMention = contentRaw.replace("<@" + selfUserId + ">", "").trim();
                 if (event.getMessage().getReferencedMessage() != null) {
                     if (event.getMessage().getReferencedMessage().getAuthor().isBot()) {
-                        return null; // Não processar se a mensagem referenciada for de um bot
+                        return null;
                     }
-                    final String contentWithoutMention = contentRaw.replace("<@" + selfUserId + ">", "").trim();
                     final String replyContent = event.getMessage().getReferencedMessage().getContentRaw();
                     final String personalityForReply = "This user is going to ask you a question and the content of the question is: " + replyContent + ".";
-                    // Usar o método que permite ignorar a personalidade padrão, passando 'false' para não ignorar
                     return Messages.sendMessageWithPersonality(contentWithoutMention, null, personalityForReply, false);
                 } else {
-                    final String userMessageContent = contentRaw.replace("<@" + selfUserId + ">", "").trim();
-                    return Messages.sendMessageWithoutHistory(userMessageContent);
+                    return Messages.sendMessageWithoutHistory(contentWithoutMention);
                 }
             }, ollamaApiExecutor).thenAccept(aiResponse -> {
                 if (aiResponse != null && !aiResponse.startsWith(ConnectionOllama.MESSAGE_ERROR)) {
@@ -71,7 +69,6 @@ public class ReplyAI extends ListenerAdapter {
                     System.err.println("ReplyAI: Erro da API Ollama: " + aiResponse);
                     event.getMessage().reply("Desculpe, ocorreu um erro ao processar sua solicitação com a IA.").queue();
                 }
-                // Se aiResponse for null (caso da mensagem referenciada ser de um bot), não faz nada.
             }).exceptionally(ex -> {
                 System.err.println("ReplyAI: Exceção ao processar mensagem com IA: " + ex.getMessage());
                 event.getMessage().reply("Desculpe, ocorreu um erro inesperado ao processar sua solicitação.").queue();

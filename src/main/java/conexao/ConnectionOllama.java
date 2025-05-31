@@ -100,27 +100,7 @@ public class ConnectionOllama {
 
     public static String sendMessageToOllama(String userMessageContent, JSONArray baseConversationHistory, String systemPersonality, boolean ignoreDefaultPersonality) {
         final JSONArray messagesForPayload = new JSONArray();
-        String effectiveSystemPersonality = null;
-
-        if (ignoreDefaultPersonality) {
-            // Se ignorar padrão, usa apenas a systemPersonality (se existir)
-            if (systemPersonality != null && !systemPersonality.isEmpty()) {
-                effectiveSystemPersonality = systemPersonality;
-            }
-        } else {
-            // Comportamento padrão (não ignorar)
-            if (Configuration.PERSONALITY != null && !Configuration.PERSONALITY.isEmpty()) {
-                effectiveSystemPersonality = Configuration.PERSONALITY;
-            }
-
-            if (systemPersonality != null && !systemPersonality.isEmpty()) {
-                if (effectiveSystemPersonality != null) {
-                    effectiveSystemPersonality = effectiveSystemPersonality + "\n" + systemPersonality;
-                } else {
-                    effectiveSystemPersonality = systemPersonality;
-                }
-            }
-        }
+        final String effectiveSystemPersonality = getEffectiveSystemPersonality(systemPersonality, ignoreDefaultPersonality);
 
         if (effectiveSystemPersonality != null) {
             final JSONObject systemMsg = new JSONObject();
@@ -153,5 +133,28 @@ public class ConnectionOllama {
         }
 
         return parseResponse(rawResponse);
+    }
+
+    private static String getEffectiveSystemPersonality(String systemPersonality, boolean ignoreDefaultPersonality) {
+        String effectiveSystemPersonality = null;
+
+        if (ignoreDefaultPersonality) {
+            if (systemPersonality != null && !systemPersonality.isEmpty()) {
+                effectiveSystemPersonality = systemPersonality;
+            }
+        } else {
+            if (Configuration.PERSONALITY != null && !Configuration.PERSONALITY.isEmpty()) {
+                effectiveSystemPersonality = Configuration.PERSONALITY;
+            }
+
+            if (systemPersonality != null && !systemPersonality.isEmpty()) {
+                if (effectiveSystemPersonality != null) {
+                    effectiveSystemPersonality = effectiveSystemPersonality + "\n" + systemPersonality;
+                } else {
+                    effectiveSystemPersonality = systemPersonality;
+                }
+            }
+        }
+        return effectiveSystemPersonality;
     }
 }

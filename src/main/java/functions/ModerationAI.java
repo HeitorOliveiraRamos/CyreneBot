@@ -1,6 +1,6 @@
 package functions;
 
-import conexao.ConnectionOllama; // Importar para usar MESSAGE_ERROR
+import conexao.ConnectionOllama;
 import conexao.Messages;
 import net.dv8tion.jda.api.entities.UserSnowflake;
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
@@ -18,7 +18,6 @@ public class ModerationAI extends ListenerAdapter {
 
     private static final int MAX_WARNINGS = 3;
     private static final Duration TIMEOUT_DURATION = Duration.ofMinutes(15);
-    private static final String MODERATION_SYSTEM_PROMPT = "You are a villain – a truly wicked character, an enemy, someone who spreads chaos. However, you have limits. Read the user's message and determine if it exceeds those limits. You don’t respond to lengthy text or spam; you’ll only respond with something other than 'false' when the message is exceptionally disturbing. Respond with 'true' only when the user's statement goes far beyond any reasonable limit. Otherwise, respond with ‘false’. Just say ‘true’ or ‘false’, nothing more.";
     private final Map<String, Integer> userWarnings = new HashMap<>();
 
     // ExecutorService para lidar com as chamadas à API Ollama de forma assíncrona
@@ -44,10 +43,8 @@ public class ModerationAI extends ListenerAdapter {
         final String userId = event.getAuthor().getId();
         final String userName = event.getAuthor().getName();
 
-        // Executa a verificação da IA de forma assíncrona
         CompletableFuture.supplyAsync(() -> checkMessageWithAI(messageContent), ollamaApiExecutor)
                 .thenAccept(isContentInappropriate -> {
-                    // Esta lógica é executada após a conclusão da chamada à IA
                     if (isContentInappropriate) {
                         event.getMessage().delete().queue(
                                 success -> event.getChannel().sendMessage(event.getAuthor().getAsMention() + ", sua mensagem foi considerada inadequada e removida.").queue(),
@@ -57,15 +54,16 @@ public class ModerationAI extends ListenerAdapter {
                         final int warnings = userWarnings.compute(userId, (k, v) -> (v == null ? 0 : v) + 1);
                         final boolean isSilenced = warnings >= MAX_WARNINGS;
 
+                        @SuppressWarnings("StringBufferReplaceableByString")
                         final StringBuilder messageBuilder = new StringBuilder();
+
                         messageBuilder.append(event.getGuild().getName()).append("\n");
                         messageBuilder.append("Notifica que o usuário ").append("***").append(userName).append("***").append(" foi ").append(isSilenced ? "mutado" : "avisado").append(" por conteúdo inadequado.\n\n");
                         messageBuilder.append("**Mensagem que causou o ").append(isSilenced ? "silenciamento" : "aviso").append(":** ").append("```").append(messageContent).append("```").append("\n");
                         messageBuilder.append("**Avisos acumulados:** ").append(warnings).append("/").append(MAX_WARNINGS).append("\n");
 
                         if (isSilenced) {
-                            event.getGuild().timeoutFor(UserSnowflake.fromId(userId), TIMEOUT_DURATION).queue(
-                                    success -> userWarnings.remove(userId), // Remove avisos após timeout bem-sucedido
+                            event.getGuild().timeoutFor(UserSnowflake.fromId(userId), TIMEOUT_DURATION).queue(success -> userWarnings.remove(userId),
                                     error -> {
                                         event.getChannel().sendMessage("Erro ao tentar silenciar " + userName + ": " + error.getMessage()).queue();
                                         System.err.println("ModerationAI: Falha ao tentar silenciar o usuário: " + userId + ": " + error.getMessage());
@@ -78,17 +76,26 @@ public class ModerationAI extends ListenerAdapter {
                     }
                 }).exceptionally(ex -> {
                     System.err.println("ModerationAI: Exceção ao verificar mensagem com IA para conteúdo \"" + messageContent + "\": " + ex.getMessage());
-                    // Considerar logar a stack trace para depuração: ex.printStackTrace();
-                    return null; // Obrigatório para exceptionally
+                    return null;
                 });
     }
 
     private boolean checkMessageWithAI(String messageContent) {
-        final String aiResponse = Messages.sendMessageWithPersonality(messageContent.toLowerCase(), null, MODERATION_SYSTEM_PROMPT, true);
+
+        final String moderationSystemPrompt = """
+                You are a villain – a truly wicked character, an enemy, someone who spreads chaos. However, you have limits.
+                Read the user's message and determine if it exceeds those limits.
+                You don’t respond to lengthy text or spam; you’ll only respond with something other than 'false' when the message is exceptionally disturbing.
+                Respond with 'true' only when the user's statement goes far beyond any reasonable limit.
+                Otherwise, respond with ‘false’.
+                Just say ‘true’ or ‘false’, nothing more.
+            """;
+
+        final String aiResponse = Messages.sendMessageWithPersonality(messageContent.toLowerCase(), null, moderationSystemPrompt, true);
 
         if (aiResponse.startsWith(ConnectionOllama.MESSAGE_ERROR)) {
             System.err.println("ModerationAI: Erro da API Ollama: " + aiResponse + " para conteúdo: \"" + messageContent + "\"");
-            return false; // Considera não inadequado em caso de erro da API
+            return false;
         }
 
         if (aiResponse.trim().equalsIgnoreCase("true")) {
@@ -97,7 +104,7 @@ public class ModerationAI extends ListenerAdapter {
             return false;
         } else {
             System.err.println("ModerationAI: Unexpected response from AI: \"" + aiResponse + "\" for content: \"" + messageContent + "\"");
-            return false; // Considera não inadequado se a resposta não for clara
+            return false;
         }
     }
 

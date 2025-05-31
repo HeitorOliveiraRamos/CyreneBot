@@ -42,16 +42,11 @@ public class ChatBot extends ListenerAdapter {
         final String content = message.getContentRaw();
 
         final boolean isInCurrentUserSession = this.userChatSessions.getOrDefault(sessionKey, false);
-        // Acessar ou criar o histórico de forma segura para threads, se necessário,
-        // mas como cada sessão de usuário tem seu próprio histórico,
-        // e as operações no JSONArray são feitas dentro do CompletableFuture,
-        // o acesso direto aqui para computeIfAbsent deve ser seguro.
         final JSONArray currentUserAIHistory = this.userAIConversationHistories.computeIfAbsent(sessionKey, k -> new JSONArray());
 
         if (!isInCurrentUserSession) {
             if (content.equalsIgnoreCase("vamos conversar")) {
                 this.userChatSessions.put(sessionKey, true);
-                // Limpar o histórico de forma segura
                 synchronized (currentUserAIHistory) {
                     currentUserAIHistory.clear();
                 }
@@ -62,7 +57,6 @@ public class ChatBot extends ListenerAdapter {
                 final JSONObject assistantOpeningMessage = new JSONObject();
                 assistantOpeningMessage.put("role", "assistant");
                 assistantOpeningMessage.put("content", openingLine);
-                // Adicionar ao histórico de forma segura
                 synchronized (currentUserAIHistory) {
                     currentUserAIHistory.put(assistantOpeningMessage);
                 }
@@ -71,12 +65,10 @@ public class ChatBot extends ListenerAdapter {
             if (content.equalsIgnoreCase("encerrar conversa")) {
                 this.userChatSessions.put(sessionKey, false);
                 message.reply("Até mais!").queue();
-                // Limpar o histórico de forma segura
                 synchronized (currentUserAIHistory) {
                     currentUserAIHistory.clear();
                 }
             } else {
-                // Adiciona a mensagem do usuário ao histórico antes de chamar a IA
                 final JSONObject userMessageEntry = new JSONObject();
                 userMessageEntry.put("role", "user");
                 userMessageEntry.put("content", content);
@@ -84,12 +76,9 @@ public class ChatBot extends ListenerAdapter {
                     currentUserAIHistory.put(userMessageEntry);
                 }
 
-                // Cria uma cópia do histórico para passar para a thread da API
-                // para evitar ConcurrentModificationException se o histórico for modificado
-                // enquanto a API está processando.
                 final JSONArray historySnapshot;
                 synchronized (currentUserAIHistory) {
-                    historySnapshot = new JSONArray(currentUserAIHistory.toString()); // Cria uma cópia profunda
+                    historySnapshot = new JSONArray(currentUserAIHistory.toString());
                 }
 
                 CompletableFuture.supplyAsync(() -> Messages.sendMessageWithHistory(content, historySnapshot), ollamaApiExecutor)
@@ -98,17 +87,12 @@ public class ChatBot extends ListenerAdapter {
                                 final JSONObject assistantMessageEntry = new JSONObject();
                                 assistantMessageEntry.put("role", "assistant");
                                 assistantMessageEntry.put("content", aiResponse);
-                                // Adicionar ao histórico original de forma segura
                                 synchronized (currentUserAIHistory) {
-                                    // Verifica se a sessão ainda está ativa antes de adicionar a resposta da IA
-                                    // Isso evita adicionar ao histórico se o usuário encerrou a conversa
-                                    // enquanto a IA processava.
                                     if (this.userChatSessions.getOrDefault(sessionKey, false)) {
                                         currentUserAIHistory.put(assistantMessageEntry);
                                     }
                                 }
                             }
-                            // Envia a resposta independentemente de erro, pois Messages.sendLongMessageReply lida com isso
                             Messages.sendLongMessageReply(message, aiResponse);
                         }).exceptionally(ex -> {
                             System.err.println("ChatBot: Exceção ao processar mensagem com IA: " + ex.getMessage());

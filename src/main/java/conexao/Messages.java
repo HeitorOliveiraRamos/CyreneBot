@@ -3,6 +3,7 @@ package conexao;
 import net.dv8tion.jda.api.entities.Message;
 import net.dv8tion.jda.api.entities.channel.middleman.MessageChannel;
 import org.json.JSONArray;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -42,18 +43,6 @@ public class Messages {
      */
     public static String sendMessageWithPersonality(String userMessageContent, JSONArray conversationHistory, String personality, boolean ignoreDefaultPersonality) {
         return ConnectionOllama.sendMessageToOllama(userMessageContent, conversationHistory, personality, ignoreDefaultPersonality);
-    }
-
-    /**
-     * Envia uma mensagem para a API Ollama com histórico e personalidade.
-     *
-     * @param userMessageContent O conteúdo da mensagem do usuário.
-     * @param conversationHistory O histórico da conversa.
-     * @param personality A personalidade da IA.
-     * @return A resposta da IA ou uma mensagem de erro.
-     */
-    public static String sendMessageWithPersonality(String userMessageContent, JSONArray conversationHistory, String personality) {
-        return ConnectionOllama.sendMessageToOllama(userMessageContent, conversationHistory, personality, false);
     }
 
     /**
@@ -112,7 +101,7 @@ public class Messages {
                     end = lastSpace;
                 }
             } else {
-                end = Math.min(end, message.length());
+                end = message.length();
             }
 
             String part = message.substring(index, end).trim();

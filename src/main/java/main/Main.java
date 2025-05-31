@@ -13,14 +13,14 @@ import net.dv8tion.jda.api.interactions.commands.build.Commands;
 import net.dv8tion.jda.api.requests.GatewayIntent;
 
 public class Main extends ListenerAdapter {
-    public static void main(String[] args) throws InterruptedException {
+    public static void main(String[] args) {
         final JDABuilder builder = JDABuilder.createDefault(Configuration.TOKEN, GatewayIntent.GUILD_MESSAGES, GatewayIntent.MESSAGE_CONTENT, GatewayIntent.DIRECT_MESSAGES, GatewayIntent.GUILD_MEMBERS);
 
         final ModerationAI moderationAIListener = new ModerationAI();
         final ReplyAI replyAIListener = new ReplyAI();
-        final ChatBot chatBotListener = new ChatBot(); // Instanciar ChatBot
+        final ChatBot chatBotListener = new ChatBot();
 
-        builder.addEventListeners(chatBotListener); // Adicionar a instância de ChatBot
+        builder.addEventListeners(chatBotListener);
         builder.addEventListeners(replyAIListener);
         builder.addEventListeners(moderationAIListener);
         builder.addEventListeners(new ClearPrivateChannel());
@@ -32,7 +32,7 @@ public class Main extends ListenerAdapter {
             System.out.println("Desligando o bot...");
             moderationAIListener.shutdownExecutor();
             replyAIListener.shutdownExecutor();
-            chatBotListener.shutdownExecutor(); // Desligar o ExecutorService do ChatBot
+            chatBotListener.shutdownExecutor();
             jda.shutdown();
             try {
                 jda.awaitShutdown();
