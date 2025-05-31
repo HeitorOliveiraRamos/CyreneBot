@@ -1,6 +1,6 @@
 package functions;
 
-import conexao.ConnectionOllama; // Importar para usar MESSAGE_ERROR
+import conexao.ConnectionOllama;
 import conexao.Messages;
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
 import net.dv8tion.jda.api.hooks.ListenerAdapter;
@@ -17,8 +17,10 @@ public class ReplyAI extends ListenerAdapter {
     private final Map<String, Long> userCooldowns = new HashMap<>();
     private static final long COOLDOWN_DURATION_SECONDS = 5;
     private final ExecutorService ollamaApiExecutor;
+    private final ChatBot chatBot;
 
-    public ReplyAI() {
+    public ReplyAI(ChatBot chatBot) {
+        this.chatBot = chatBot;
         this.ollamaApiExecutor = Executors.newCachedThreadPool(r -> {
             Thread t = Executors.defaultThreadFactory().newThread(r);
             t.setName("OllamaAPI-Reply-Thread-%d");
@@ -34,6 +36,12 @@ public class ReplyAI extends ListenerAdapter {
         }
 
         final String userId = event.getAuthor().getId();
+        final String channelId = event.getChannel().getId();
+
+        if (chatBot.isUserInChatSession(userId, channelId)) {
+            return;
+        }
+
         final long currentTime = System.currentTimeMillis();
 
         if (event.getMessage().getMentions().getUsers().contains(event.getJDA().getSelfUser())) {

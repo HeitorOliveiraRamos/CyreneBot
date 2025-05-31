@@ -20,15 +20,13 @@ public class ModerationAI extends ListenerAdapter {
     private static final Duration TIMEOUT_DURATION = Duration.ofMinutes(15);
     private final Map<String, Integer> userWarnings = new HashMap<>();
 
-    // ExecutorService para lidar com as chamadas à API Ollama de forma assíncrona
     private final ExecutorService ollamaApiExecutor;
 
     public ModerationAI() {
-        // É uma boa prática usar um ThreadFactory nomeado para facilitar a depuração.
         this.ollamaApiExecutor = Executors.newCachedThreadPool(r -> {
             Thread t = Executors.defaultThreadFactory().newThread(r);
             t.setName("OllamaAPI-Moderation-Thread-%d");
-            t.setDaemon(true); // Threads daemon não impedem o JVM de sair
+            t.setDaemon(true);
             return t;
         });
     }
@@ -81,7 +79,6 @@ public class ModerationAI extends ListenerAdapter {
     }
 
     private boolean checkMessageWithAI(String messageContent) {
-
         final String moderationSystemPrompt = """
                 You are a villain – a truly wicked character, an enemy, someone who spreads chaos. However, you have limits.
                 Read the user's message and determine if it exceeds those limits.
@@ -108,9 +105,6 @@ public class ModerationAI extends ListenerAdapter {
         }
     }
 
-    /**
-     * Método para desligar o ExecutorService. Deve ser chamado quando o bot é encerrado.
-     */
     public void shutdownExecutor() {
         ollamaApiExecutor.shutdown();
         try {
