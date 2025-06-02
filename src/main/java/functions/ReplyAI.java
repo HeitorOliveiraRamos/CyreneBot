@@ -65,10 +65,10 @@ public class ReplyAI extends ListenerAdapter {
                         return null;
                     }
                     final String replyContent = event.getMessage().getReferencedMessage().getContentRaw();
-                    final String personalityForReply = "This user is going to ask you a question and the content of the question is: " + replyContent + ".";
+                    final String personalityForReply = "The user " + event.getAuthor().getName() + " is going to ask you a question and the content of the question is: " + replyContent + ".";
                     return Messages.sendMessageWithPersonality(contentWithoutMention, null, personalityForReply, false);
                 } else {
-                    return Messages.sendMessageWithoutHistory(contentWithoutMention);
+                    return Messages.sendMessageWithPersonality(contentWithoutMention, null, "The user you are talking to is called: " + event.getAuthor().getName() + ". **Important: You must add his name in your response.**", false);
                 }
             }, ollamaApiExecutor).thenAccept(aiResponse -> {
                 if (aiResponse != null && !aiResponse.startsWith(ConnectionOllama.MESSAGE_ERROR)) {

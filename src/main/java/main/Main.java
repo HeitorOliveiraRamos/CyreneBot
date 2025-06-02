@@ -35,7 +35,6 @@ public class Main extends ListenerAdapter {
         ).queue();
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            System.out.println("Desligando o bot...");
             moderationAIListener.shutdownExecutor();
             replyAIListener.shutdownExecutor();
             chatBotListener.shutdownExecutor();
@@ -44,7 +43,6 @@ public class Main extends ListenerAdapter {
             try {
                 jda.awaitShutdown();
             } catch (InterruptedException e) {
-                System.err.println("Interrompido durante o desligamento do JDA.");
                 Thread.currentThread().interrupt();
             }
             System.out.println("Bot desligado.");

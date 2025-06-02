@@ -40,11 +40,10 @@ public class ChatContext extends ListenerAdapter {
                     conversationHistory.put(messageEntry);
                 }
 
-                final String systemPersonality = "You are an assistant specialized in summarizing conversations. Analyze the provided message history, where each message already indicates its author. Create a concise summary identifying the participants and the main topics discussed by each one. The summary should be direct and informative, focusing on the conversation flow and the key points addressed.";
-                final String userPromptForAI = "Based on the previous message history, please provide a summary of the conversation's context. The summary should highlight the main topics discussed and the participants involved. Never break your personality character.";
+                final String userPromptForAI = "Based on the previous message history, provide a summary of the conversation's context in high detail, explaining what author had in it's mind. The summary should highlight the main topics discussed and the participants involved. Never break your personality character.";
 
                 CompletableFuture.supplyAsync(() ->
-                                        Messages.sendMessageWithPersonality(userPromptForAI, conversationHistory, systemPersonality, false),
+                                        Messages.sendMessageWithPersonality(userPromptForAI, conversationHistory, null, false),
                                 ollamaApiExecutor)
                         .thenAccept(aiResponse -> {
                             if (aiResponse != null && !aiResponse.startsWith(ConnectionOllama.MESSAGE_ERROR)) {
