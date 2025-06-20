@@ -7,4 +7,8 @@ public class Configuration {
     public static final String MODEL = System.getenv("MODEL_NAME");
     public static final String PERSONALITY = System.getenv("BOT_PERSONALITY");
     public static final String BASE_URL = "http://localhost:11434/api/chat";
+
+
+    //Configurações de moderação
+    public static boolean canMentionHereAndEveryone = false;
 }

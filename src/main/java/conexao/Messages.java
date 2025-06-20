@@ -1,5 +1,6 @@
 package conexao;
 
+import main.Configuration;
 import net.dv8tion.jda.api.entities.Message;
 import net.dv8tion.jda.api.entities.channel.middleman.MessageChannel;
 import org.json.JSONArray;
@@ -52,6 +53,11 @@ public class Messages {
      * @param message O conteúdo da mensagem.
      */
     public static void sendLongMessage(MessageChannel channel, String message) {
+        if (!Configuration.canMentionHereAndEveryone && (message.contains("@everyone") || message.contains("@here"))) {
+            channel.sendMessage("não posso fazer isso").queue();
+            return;
+        }
+
         if (message.length() <= MAX_MESSAGE_LENGTH) {
             channel.sendMessage(message).queue();
         } else {
@@ -69,6 +75,11 @@ public class Messages {
      * @param message O conteúdo da resposta.
      */
     public static void sendLongMessageReply(Message mensagemEnviada, String message) {
+        if (!Configuration.canMentionHereAndEveryone && (message.contains("@everyone") || message.contains("@here"))) {
+            mensagemEnviada.reply("Não posso fazer isso").queue();
+            return;
+        }
+
         if (message.length() <= MAX_MESSAGE_LENGTH) {
             mensagemEnviada.reply(message).queue();
         } else {
