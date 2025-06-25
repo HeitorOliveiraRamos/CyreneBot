@@ -2,6 +2,7 @@ package functions;
 
 import conexao.ConnectionOllama;
 import conexao.Messages;
+import main.Configuration;
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
 import net.dv8tion.jda.api.hooks.ListenerAdapter;
 
@@ -31,6 +32,11 @@ public class ReplyAI extends ListenerAdapter {
 
     @Override
     public void onMessageReceived(MessageReceivedEvent event) {
+
+        if (!event.getMessage().getChannel().getId().equals(Configuration.TEST_CHANNEL)) {
+            return;
+        }
+
         if (event.getAuthor().isBot()) {
             return;
         }
