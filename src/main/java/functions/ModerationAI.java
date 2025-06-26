@@ -52,8 +52,7 @@ public class ModerationAI extends ListenerAdapter {
                         final int warnings = userWarnings.compute(userId, (k, v) -> (v == null ? 0 : v) + 1);
                         final boolean isSilenced = warnings >= MAX_WARNINGS;
 
-                        @SuppressWarnings("StringBufferReplaceableByString")
-                        final StringBuilder messageBuilder = new StringBuilder();
+                        @SuppressWarnings("StringBufferReplaceableByString") final StringBuilder messageBuilder = new StringBuilder();
 
                         messageBuilder.append(event.getGuild().getName()).append("\n");
                         messageBuilder.append("Notifica que o usuário ").append("***").append(userName).append("***").append(" foi ").append(isSilenced ? "mutado" : "avisado").append(" por conteúdo inadequado.\n\n");
@@ -80,13 +79,15 @@ public class ModerationAI extends ListenerAdapter {
 
     private boolean checkMessageWithAI(String messageContent) {
         final String moderationSystemPrompt = """
-                You are a villain – a truly wicked character, an enemy, someone who spreads chaos. However, you have limits.
-                Read the user's message and determine if it exceeds those limits.
-                You don’t respond to lengthy text or spam; you’ll only respond with something other than 'false' when the message is exceptionally disturbing.
-                Respond with 'true' only when the user's statement goes far beyond any reasonable limit.
-                Otherwise, respond with ‘false’.
-                Just say ‘true’ or ‘false’, nothing more.
-            """;
+                You are a strict and objective AI moderator. Your task is to assess whether a user's message violates community guidelines due to extreme content.
+                
+                Only respond with:
+                - 'true' → if the message contains hate speech, threats, extreme harassment, or any other content that is severely inappropriate or harmful.
+                - 'false' → for all other cases, including mild rudeness, spam, jokes, or off-topic content.
+                
+                Do not explain your answer. Respond only with 'true' or 'false'.
+                """;
+
 
         final String aiResponse = Messages.sendMessageWithPersonality(messageContent.toLowerCase(), null, moderationSystemPrompt, true);
 

@@ -20,7 +20,7 @@ public class Main extends ListenerAdapter {
         builder.addEventListeners(chatBotListener);
         builder.addEventListeners(replyAIListener);
         builder.addEventListeners(explainChatContextListener);
-//        builder.addEventListeners(moderationAIListener);
+        builder.addEventListeners(moderationAIListener);
         builder.addEventListeners(new ClearPrivateChannel());
 
         final JDA jda = builder.build();
