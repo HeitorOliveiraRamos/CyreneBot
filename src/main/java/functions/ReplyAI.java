@@ -32,7 +32,6 @@ public class ReplyAI extends ListenerAdapter {
 
     @Override
     public void onMessageReceived(MessageReceivedEvent event) {
-
         if (!event.getMessage().getChannel().getId().equals(Configuration.TEST_CHANNEL)) {
             return;
         }
