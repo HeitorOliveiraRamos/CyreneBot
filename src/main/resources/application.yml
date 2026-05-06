@@ -1,0 +1,51 @@
+spring:
+  application:
+    name: cyrene-bot
+  main:
+    web-application-type: none
+  datasource:
+    url: jdbc:postgresql://localhost:5432/cyrene
+    username: ${DB_USER:cyrene}
+    password: ${DB_PASSWORD:cyrene}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc.time_zone: UTC
+    open-in-view: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  ai:
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      chat:
+        options:
+          model: ${MODEL_NAME:llama3}
+
+bot:
+  token: ${BOT_TOKEN}
+  personality: ${BOT_PERSONALITY:}
+  model-name: ${MODEL_NAME:llama3}
+  reply:
+    # Channel ID where mention-reply (formerly TEST_CHANNEL_ID) is active.
+    channel-id: ${TEST_CHANNEL_ID:}
+    cooldown-seconds: 5
+  message:
+    max-length: 2000
+    can-mention-here-and-everyone: false
+  context:
+    history-fetch-size: 50
+  moderation:
+    enabled: ${MODERATION_ENABLED:false}
+    channel-id: ${MODERATION_CHANNEL_ID:}
+    max-warnings: 3
+    timeout-minutes: 15
+
+logging:
+  level:
+    root: INFO
+    com.cyrene: DEBUG
+    net.dv8tion.jda: INFO
