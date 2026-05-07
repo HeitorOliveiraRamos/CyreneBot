@@ -13,9 +13,9 @@ import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 
 /**
- * Replies when the bot is @-mentioned in the configured reply channel. Skipped when the
- * mentioning user is already in an active `/iniciar-conversa` session (the chat listener
- * handles those). Replaces the legacy `ReplyAI` listener.
+ * Replies when the bot is @-mentioned in any channel. Skipped when the mentioning user
+ * is already in an active `/iniciar-conversa` session (the chat listener handles those).
+ * Replaces the legacy `ReplyAI` listener.
  */
 @Component
 class MentionReplyListener(
@@ -30,8 +30,6 @@ class MentionReplyListener(
     private val cooldowns = mutableMapOf<String, Long>()
 
     override fun onMessageReceived(event: MessageReceivedEvent) {
-        val replyChannelId = properties.reply.channelId
-        if (replyChannelId.isBlank() || event.channel.id != replyChannelId) return
         if (event.author.isBot) return
         if (conversations.isInActiveSession(event.author.id, event.channel.id)) return
 

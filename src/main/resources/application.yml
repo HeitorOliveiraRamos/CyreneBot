@@ -27,11 +27,9 @@ spring:
 
 bot:
   token: ${BOT_TOKEN}
-  personality: ${BOT_PERSONALITY:}
+  personality-file: ${BOT_PERSONALITY_FILE:classpath:prompts/cyrene-personality.md}
   model-name: ${MODEL_NAME:llama3}
   reply:
-    # Channel ID where mention-reply (formerly TEST_CHANNEL_ID) is active.
-    channel-id: ${TEST_CHANNEL_ID:}
     cooldown-seconds: 5
   message:
     max-length: 2000

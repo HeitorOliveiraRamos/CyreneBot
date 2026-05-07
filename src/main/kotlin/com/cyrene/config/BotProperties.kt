@@ -5,7 +5,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 @ConfigurationProperties(prefix = "bot")
 data class BotProperties(
     val token: String,
-    val personality: String = "",
+    val personalityFile: String = "classpath:prompts/cyrene-personality.md",
     val modelName: String,
     val reply: Reply = Reply(),
     val message: Message = Message(),
@@ -13,7 +13,6 @@ data class BotProperties(
     val moderation: Moderation = Moderation(),
 ) {
     data class Reply(
-        val channelId: String = "",
         val cooldownSeconds: Long = 5,
     )
 
