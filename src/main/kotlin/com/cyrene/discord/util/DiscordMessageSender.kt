@@ -11,12 +11,21 @@ class DiscordMessageSender(private val properties: BotProperties) {
     private val maxLength: Int get() = properties.message.maxLength
     private val ellipsis = "[...]"
 
+    /**
+     * Last-resort text used when an upstream pipeline hands us a blank string. JDA's
+     * `sendMessage("")` throws — without this guard the whole async chain fails after
+     * a moderation action has already taken effect server-side, which is the worst
+     * possible failure mode (the user thinks nothing happened).
+     */
+    private val blankFallback = "Pronto."
+
     fun sendLong(channel: MessageChannel, content: String) {
         if (containsBlockedMention(content)) {
             channel.sendMessage("não posso fazer isso").queue()
             return
         }
-        split(content).forEach { channel.sendMessage(it).queue() }
+        val safe = content.ifBlank { blankFallback }
+        split(safe).forEach { channel.sendMessage(it).queue() }
     }
 
     fun replyLong(original: Message, content: String) {
@@ -24,7 +33,8 @@ class DiscordMessageSender(private val properties: BotProperties) {
             original.reply("Não posso fazer isso").queue()
             return
         }
-        split(content).forEach { original.reply(it).queue() }
+        val safe = content.ifBlank { blankFallback }
+        split(safe).forEach { original.reply(it).queue() }
     }
 
     private fun containsBlockedMention(text: String): Boolean =

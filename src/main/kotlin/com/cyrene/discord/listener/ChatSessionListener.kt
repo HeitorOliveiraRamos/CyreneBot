@@ -1,7 +1,11 @@
 package com.cyrene.discord.listener
 
 import com.cyrene.ai.OllamaAiService
+import com.cyrene.conversation.ConversationMessage
 import com.cyrene.conversation.ConversationService
+import com.cyrene.conversation.MessageRole
+import com.cyrene.conversation.UserInfoService
+import com.cyrene.discord.tools.DiscordToolContext
 import com.cyrene.discord.util.DiscordMessageSender
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
@@ -12,13 +16,26 @@ import java.util.concurrent.Executor
 
 /**
  * Forwards messages from users with an active `/iniciar-conversa` session to Ollama,
- * persisting both sides of the exchange. Replaces the legacy `ChatBot` listener.
+ * persisting both sides of the exchange as a single combined row.
+ *
+ * Like the @-mention path, this listener injects the cached
+ * [com.cyrene.conversation.UserInfo] profile as a system block so the voice model knows
+ * the user's name (avoiding leaked `{nome}` placeholders from the persona examples) and
+ * the brain has cached permission flags without needing to call tools. In DM sessions
+ * the profile is stored under the [UserInfoService.DM_GUILD] sentinel and has no
+ * role/permissions.
+ *
+ * The user turn is no longer persisted before the AI call — exchanges are written as a
+ * single combined row after the reply lands. A crash mid-call therefore loses the
+ * in-flight user message; chat sessions are short-lived enough that this trade-off
+ * (chosen explicitly) is acceptable in exchange for a simpler persistence shape.
  */
 @Component
 class ChatSessionListener(
     private val conversations: ConversationService,
     private val ai: OllamaAiService,
     private val sender: DiscordMessageSender,
+    private val userInfoService: UserInfoService,
     private val executor: Executor,
 ) : ListenerAdapter() {
 
@@ -35,16 +52,47 @@ class ChatSessionListener(
         val conversationId = active.id ?: return
         val content = message.contentRaw
 
-        // Persist the user turn first so it survives a crash mid-call, then ask the AI
-        // using the just-updated history (which now ends with this user message).
-        conversations.recordUserMessage(conversationId, content)
-        val history = conversations.history(conversationId)
+        // History is the prior persisted exchanges; the current user turn is appended
+        // in-memory before the AI call and persisted atomically afterwards along with
+        // the reply.
+        val priorHistory = conversations.history(conversationId)
+        val historyForAi = priorHistory + ConversationMessage(
+            conversationId = conversationId,
+            role = MessageRole.USER,
+            content = content,
+        )
+
+        val toolContext = DiscordToolContext(
+            callerUserId = userId,
+            guildId = if (event.isFromGuild) event.guild.id else null,
+            channelId = channelId,
+        )
 
         CompletableFuture
-            .supplyAsync({ ai.chat(history) }, executor)
-            .thenAccept { reply ->
-                conversations.recordAssistantMessage(conversationId, reply)
-                sender.replyLong(message, reply)
+            .supplyAsync(
+                {
+                    val resolved = userInfoService.resolveForEvent(event)
+                    val systemPrompt = resolved?.let { userInfoService.assembleSystemPrompt(it.info) }
+                    val reply = ai.chatBrainAndVoice(
+                        history = historyForAi,
+                        toolContext = toolContext,
+                        extraSystemPrompt = systemPrompt,
+                    )
+                    PreparedReply(reply, resolved?.guildId)
+                },
+                executor,
+            )
+            .thenAccept { prepared ->
+                val persisted = conversations.recordExchange(conversationId, content, prepared.reply)
+                if (!persisted) {
+                    log.debug("Skipped recording exchange for conv {} — no longer active", conversationId)
+                }
+                try {
+                    prepared.guildId?.let { userInfoService.incrementExchanges(userId, it) }
+                } catch (e: Exception) {
+                    log.warn("Failed to bump user_info exchange counter for {}", userId, e)
+                }
+                sender.replyLong(message, prepared.reply)
             }
             .exceptionally { ex ->
                 log.error("Failed to process chat-session message for conv {}", conversationId, ex)
@@ -53,4 +101,6 @@ class ChatSessionListener(
                 null
             }
     }
+
+    private data class PreparedReply(val reply: String, val guildId: String?)
 }

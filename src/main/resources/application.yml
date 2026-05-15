@@ -23,12 +23,33 @@ spring:
       base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
       chat:
         options:
-          model: ${MODEL_NAME:llama3}
+          # NOTE: For Discord tool calling to work, MODEL_NAME must be a tool-capable
+          # Ollama model. Verified options include: llama3.1, llama3.2, qwen2.5,
+          # qwen2.5-coder, mistral-nemo, mistral-small, granite3-dense.
+          # Plain `llama3` does NOT support tools and will cause tool-aware chats to
+          # fall back to text-only behavior.
+          model: ${MODEL_NAME:llama3.1}
 
 bot:
   token: ${BOT_TOKEN}
   personality-file: ${BOT_PERSONALITY_FILE:classpath:prompts/cyrene-personality.md}
-  model-name: ${MODEL_NAME:llama3}
+  # Default Ollama model used by legacy single-pass paths (e.g. /contexto-do-canal).
+  # MUST be tool-capable (llama3.1, llama3.2, qwen2.5, mistral-nemo, etc.) —
+  # plain `llama3` does NOT support tools.
+  model-name: ${MODEL_NAME:llama3.1}
+  # Brain pass: decides tool calls and produces a factual, neutral description of
+  # what was done. MUST be tool-capable.
+  brain-model-name: ${BRAIN_MODEL_NAME:llama3.1}
+  # Voice pass: rewrites the brain's output as Cyrene in persona. No tool callbacks
+  # are attached to this pass.
+  voice-model-name: ${VOICE_MODEL_NAME:llama3.1}
+  # Ollama inference tuning. These are applied at every call site by OllamaAiService
+  # because per-prompt OllamaOptions replace Spring AI's chat.options defaults.
+  # Raise num-ctx only if prompts are actually long — larger ctx grows the KV cache.
+  performance:
+    num-ctx: ${OLLAMA_NUM_CTX:4096}
+    num-predict: ${OLLAMA_NUM_PREDICT:512}
+    num-thread: ${OLLAMA_NUM_THREAD:8}
   reply:
     cooldown-seconds: 5
   message:
@@ -36,11 +57,21 @@ bot:
     can-mention-here-and-everyone: false
   context:
     history-fetch-size: 50
-  moderation:
-    enabled: ${MODERATION_ENABLED:false}
-    channel-id: ${MODERATION_CHANNEL_ID:}
-    max-warnings: 3
-    timeout-minutes: 15
+  # Rolling per-(user, channel) context for the @-mention reply path (MentionContextService).
+  # Lets the bot remember its own follow-up questions ("por quanto tempo?") so the next
+  # mention from the same user completes the action instead of starting from zero.
+  mention-context:
+    max-messages: ${MENTION_CTX_MAX:10}
+    recency-minutes: ${MENTION_CTX_RECENCY_MIN:30}
+    retention-hours: ${MENTION_CTX_RETENTION_H:24}
+  # Cached per-(user, guild) profile populated on first @-mention so the brain doesn't
+  # have to call getCallerInfo / getCallerModerationPermissions on every interaction.
+  # A daily cron refreshes name/role/permissions; personality summary is regenerated
+  # every N persisted exchanges.
+  user-info:
+    refresh-cron: ${USER_INFO_REFRESH_CRON:0 0 4 * * *}
+    personality-refresh-every-exchanges: ${USER_INFO_PERSONALITY_EVERY:10}
+    personality-sample-size: ${USER_INFO_PERSONALITY_SAMPLE:10}
 
 logging:
   level:

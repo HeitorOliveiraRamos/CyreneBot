@@ -7,7 +7,7 @@ import java.time.OffsetDateTime
 @Service
 class ConversationService(
     private val conversations: ConversationRepository,
-    private val messages: ConversationMessageRepository,
+    private val exchanges: ConversationExchangeRepository,
 ) {
 
     @Transactional(readOnly = true)
@@ -19,8 +19,9 @@ class ConversationService(
         activeConversation(userId, channelId) != null
 
     /**
-     * Starts a new conversation for (user, channel). Returns null if one is already active.
-     * The opening assistant line is persisted as the first message of the new conversation.
+     * Starts a new conversation for (user, channel). Returns null if one is already
+     * active. The opening assistant line is persisted as the first exchange of the new
+     * conversation with a null `user_message` (no user counterpart for the greeting).
      */
     @Transactional
     fun startSession(userId: String, channelId: String, openingLine: String): Conversation? {
@@ -28,19 +29,20 @@ class ConversationService(
             return null
         }
         val conv = conversations.save(Conversation(userId = userId, channelId = channelId))
-        messages.save(
-            ConversationMessage(
+        exchanges.save(
+            ConversationExchange(
                 conversationId = conv.id!!,
-                role = MessageRole.ASSISTANT,
-                content = openingLine,
+                userMessage = null,
+                assistantReply = openingLine,
             )
         )
         return conv
     }
 
     /**
-     * Ends the active conversation for (user, channel). Returns true if a session was ended.
-     * Messages are kept for auditability — a fresh `startSession` opens a new conversation row.
+     * Ends the active conversation for (user, channel). Returns true if a session was
+     * ended. Exchanges are kept for auditability — a fresh [startSession] opens a new
+     * conversation row.
      */
     @Transactional
     fun endSession(userId: String, channelId: String): Boolean {
@@ -52,32 +54,48 @@ class ConversationService(
         return true
     }
 
+    /**
+     * Flattens stored exchanges back into a sequence of role-tagged [ConversationMessage]s
+     * for the AI layer. An exchange with a null `userMessage` (the opening greeting)
+     * yields only the assistant turn.
+     */
     @Transactional(readOnly = true)
-    fun history(conversationId: Long): List<ConversationMessage> =
-        messages.findByConversationIdOrderByCreatedAtAsc(conversationId)
-
-    @Transactional
-    fun recordUserMessage(conversationId: Long, content: String) {
-        messages.save(
-            ConversationMessage(
-                conversationId = conversationId,
-                role = MessageRole.USER,
-                content = content,
-            )
-        )
-    }
-
-    @Transactional
-    fun recordAssistantMessage(conversationId: Long, content: String): Boolean {
-        // Only record if the conversation is still active — protects against late
-        // AI replies arriving after the user ran /encerrar-conversa.
-        val conv = conversations.findById(conversationId).orElse(null) ?: return false
-        if (!conv.active) return false
-        messages.save(
-            ConversationMessage(
+    fun history(conversationId: Long): List<ConversationMessage> {
+        val rows = exchanges.findByConversationIdOrderByCreatedAtAsc(conversationId)
+        val out = ArrayList<ConversationMessage>(rows.size * 2)
+        for (row in rows) {
+            row.userMessage?.let {
+                out += ConversationMessage(
+                    conversationId = conversationId,
+                    role = MessageRole.USER,
+                    content = it,
+                    createdAt = row.createdAt,
+                )
+            }
+            out += ConversationMessage(
                 conversationId = conversationId,
                 role = MessageRole.ASSISTANT,
-                content = content,
+                content = row.assistantReply,
+                createdAt = row.createdAt,
+            )
+        }
+        return out
+    }
+
+    /**
+     * Records a full question/answer pair as a single row. Returns false if the
+     * conversation is no longer active (protects against late AI replies arriving after
+     * the user ran `/encerrar-conversa`).
+     */
+    @Transactional
+    fun recordExchange(conversationId: Long, userMessage: String, assistantReply: String): Boolean {
+        val conv = conversations.findById(conversationId).orElse(null) ?: return false
+        if (!conv.active) return false
+        exchanges.save(
+            ConversationExchange(
+                conversationId = conversationId,
+                userMessage = userMessage,
+                assistantReply = assistantReply,
             )
         )
         return true

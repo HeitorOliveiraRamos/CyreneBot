@@ -9,7 +9,7 @@ interface ConversationRepository : JpaRepository<Conversation, Long> {
 }
 
 @Repository
-interface ConversationMessageRepository : JpaRepository<ConversationMessage, Long> {
-    fun findByConversationIdOrderByCreatedAtAsc(conversationId: Long): List<ConversationMessage>
+interface ConversationExchangeRepository : JpaRepository<ConversationExchange, Long> {
+    fun findByConversationIdOrderByCreatedAtAsc(conversationId: Long): List<ConversationExchange>
     fun deleteByConversationId(conversationId: Long)
 }
