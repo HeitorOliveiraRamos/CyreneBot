@@ -6,7 +6,10 @@ import net.dv8tion.jda.api.entities.channel.middleman.MessageChannel
 import org.springframework.stereotype.Component
 
 @Component
-class DiscordMessageSender(private val properties: BotProperties) {
+class DiscordMessageSender(
+    private val properties: BotProperties,
+    private val botReplyCache: BotReplyCache,
+) {
 
     private val maxLength: Int get() = properties.message.maxLength
     private val ellipsis = "[...]"
@@ -21,20 +24,20 @@ class DiscordMessageSender(private val properties: BotProperties) {
 
     fun sendLong(channel: MessageChannel, content: String) {
         if (containsBlockedMention(content)) {
-            channel.sendMessage("não posso fazer isso").queue()
+            channel.sendMessage("não posso fazer isso").queue(botReplyCache::put)
             return
         }
         val safe = content.ifBlank { blankFallback }
-        split(safe).forEach { channel.sendMessage(it).queue() }
+        split(safe).forEach { channel.sendMessage(it).queue(botReplyCache::put) }
     }
 
     fun replyLong(original: Message, content: String) {
         if (containsBlockedMention(content)) {
-            original.reply("Não posso fazer isso").queue()
+            original.reply("Não posso fazer isso").queue(botReplyCache::put)
             return
         }
         val safe = content.ifBlank { blankFallback }
-        split(safe).forEach { original.reply(it).queue() }
+        split(safe).forEach { original.reply(it).queue(botReplyCache::put) }
     }
 
     private fun containsBlockedMention(text: String): Boolean =

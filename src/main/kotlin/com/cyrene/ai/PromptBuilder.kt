@@ -55,6 +55,12 @@ class PromptBuilder(
         /** Heuristic floor: any real persona file is far longer than this. Catches the
          *  classpath-root directory-listing case (~20-50 chars) before it reaches Ollama. */
         const val MIN_PERSONA_LENGTH = 200
+        /** Token in the persona file that gets replaced with the real user name at
+         *  prompt-build time. Never reaches the model. */
+        const val NAME_TOKEN = "{nome}"
+        /** What [NAME_TOKEN] becomes when no user name is available. Picked so the
+         *  surrounding persona examples ("Oi, X. Diz aí.") still read naturally. */
+        const val NAME_FALLBACK = "amor"
     }
 
     /**
@@ -63,13 +69,23 @@ class PromptBuilder(
      * from the personality file, optionally joined with a per-call override; when
      * [overrideOnly] is true, the persona is ignored entirely (used by the brain
      * pass, which needs a strict, persona-less reasoning prompt).
+     *
+     * [userName] is substituted into any `{nome}` token in the assembled prompt
+     * before it reaches the model. This is the *only* way the persona's example
+     * greetings get a name — we never let the literal token `{nome}` reach the
+     * model (it copies it verbatim) and we never put illustrative names in the
+     * examples (weaker models can't tell those apart from the real one). When
+     * [userName] is null/blank, the token is replaced with [NAME_FALLBACK] so the
+     * surrounding punctuation in the persona examples stays grammatical.
      */
     fun build(
         history: List<ConversationMessage>,
         extraSystemPrompt: String? = null,
         overrideOnly: Boolean = false,
+        userName: String? = null,
     ): List<Message> {
         val systemPrompt = effectiveSystemPrompt(extraSystemPrompt, overrideOnly)
+            ?.let { substituteName(it, userName) }
         val messages = mutableListOf<Message>()
         if (!systemPrompt.isNullOrBlank()) messages += SystemMessage(systemPrompt)
         history.forEach { messages += it.toSpringAi() }
@@ -80,6 +96,11 @@ class PromptBuilder(
         if (overrideOnly) return extra?.takeIf { it.isNotBlank() }
         val tail = extra?.takeIf { it.isNotBlank() }
         return if (tail != null) "$basePersonality\n$tail" else basePersonality
+    }
+
+    private fun substituteName(prompt: String, userName: String?): String {
+        val name = userName?.trim()?.takeIf { it.isNotEmpty() } ?: NAME_FALLBACK
+        return prompt.replace(NAME_TOKEN, name)
     }
 
     private fun ConversationMessage.toSpringAi(): Message = when (role) {

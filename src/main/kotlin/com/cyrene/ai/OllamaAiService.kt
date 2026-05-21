@@ -6,6 +6,8 @@ import com.cyrene.conversation.MessageRole
 import com.cyrene.discord.tools.DiscordToolContext
 import org.slf4j.LoggerFactory
 import org.springframework.ai.chat.client.ChatClient
+import org.springframework.ai.chat.messages.SystemMessage
+import org.springframework.ai.chat.messages.UserMessage
 import org.springframework.ai.chat.prompt.Prompt
 import org.springframework.ai.ollama.OllamaChatModel
 import org.springframework.ai.ollama.api.OllamaOptions
@@ -54,16 +56,67 @@ class OllamaAiService(
         history: List<ConversationMessage>,
         toolContext: DiscordToolContext,
         extraSystemPrompt: String? = null,
+        userName: String? = null,
     ): String {
+        // Intent gate: cheap, tool-less, deterministic pre-pass. When the last user turn
+        // is purely conversational ("oi", "te amo", "qual seu nome?"), we short-circuit
+        // straight to the voice pass — which has no tools attached — so the model
+        // physically cannot misfire a moderation action on chat. Only requests that look
+        // like moderation or Discord-state queries reach the tool-aware brain pass.
+        val intent = classifyIntent(history)
+        if (log.isDebugEnabled) {
+            log.debug("Intent gate → {}", intent)
+        }
+        if (intent == Intent.CHAT) {
+            val voiceOnly = runVoicePassConversational(history, extraSystemPrompt, userName)
+            if (voiceOnly.isNotBlank()) return voiceOnly
+            log.warn("Voice short-circuit produced blank output; falling back to full brain+voice pipeline.")
+        }
+
         val brainOutput = runBrainPass(history, toolContext, extraSystemPrompt)
         if (log.isDebugEnabled) {
             log.debug("Brain output ({} chars): {}", brainOutput.length, brainOutput.take(500))
         }
-        return runVoicePass(history, brainOutput, extraSystemPrompt).ifBlank {
+        return runVoicePass(history, brainOutput, extraSystemPrompt, userName).ifBlank {
             log.warn("Voice pass produced blank output; falling back to brain output.")
             brainOutput
         }
     }
+
+    /**
+     * Lightweight binary classifier: "mod" (run the tool-aware brain) vs "chat"
+     * (short-circuit to voice-only). Uses [BotProperties.brainModelName] with very tight
+     * sampling and a tiny token budget — it only needs to output one word. Failures
+     * (parse errors, exceptions) default to [Intent.CHAT] so a flaky gate can never
+     * cause a spurious moderation action: the worst case is the brain runs when it
+     * didn't need to, identical to pre-gate behaviour.
+     */
+    private fun classifyIntent(history: List<ConversationMessage>): Intent {
+        val lastUser = history.lastOrNull { it.role == MessageRole.USER }?.content?.trim()
+        if (lastUser.isNullOrBlank()) return Intent.CHAT
+
+        val messages = listOf(
+            SystemMessage(INTENT_GATE_INSTRUCTIONS),
+            UserMessage("Mensagem: $lastUser\nResposta:"),
+        )
+        return try {
+            val response = chatModel.call(Prompt(messages, intentGateOptions()))
+            val raw = (response.result.output.text ?: "").trim().lowercase()
+            when {
+                raw.startsWith("mod") -> Intent.MODERATION
+                raw.startsWith("chat") -> Intent.CHAT
+                else -> {
+                    log.debug("Intent gate produced unrecognised output '{}'; defaulting to CHAT", raw)
+                    Intent.CHAT
+                }
+            }
+        } catch (e: Exception) {
+            log.warn("Intent gate failed; defaulting to CHAT", e)
+            Intent.CHAT
+        }
+    }
+
+    private enum class Intent { CHAT, MODERATION }
 
     /**
      * Brain pass in isolation. Persona excluded, tools attached. The model gets only
@@ -91,7 +144,7 @@ class OllamaAiService(
         }
 
         val raw = chatClient.prompt(Prompt(messages))
-            .options(options(properties.brainModelName))
+            .options(brainOptions())
             .toolContext(mapOf(DiscordToolContext.KEY to toolContext))
             .call()
             .content() ?: ""
@@ -118,6 +171,7 @@ class OllamaAiService(
         history: List<ConversationMessage>,
         brainOutput: String,
         extraSystemPrompt: String?,
+        userName: String?,
     ): String {
         val trimmed = brainOutput.trim()
         val brainHasAction = trimmed.isNotBlank() &&
@@ -134,9 +188,9 @@ class OllamaAiService(
         // For purely conversational messages (brain returned NO_ACTION), keep the full
         // history so the voice can carry on the chat naturally.
         return if (brainHasAction) {
-            runVoicePassFocused(trimmed, extraSystemPrompt)
+            runVoicePassFocused(trimmed, extraSystemPrompt, userName)
         } else {
-            runVoicePassConversational(history, extraSystemPrompt)
+            runVoicePassConversational(history, extraSystemPrompt, userName)
         }
     }
 
@@ -145,7 +199,11 @@ class OllamaAiService(
      * output as the single user-turn payload. No conversation history is included, so the
      * model cannot anchor on a moderation request and refuse.
      */
-    private fun runVoicePassFocused(brainResult: String, extraSystemPrompt: String?): String {
+    private fun runVoicePassFocused(
+        brainResult: String,
+        extraSystemPrompt: String?,
+        userName: String?,
+    ): String {
         val instruction = """
             ## Sua tarefa agora
 
@@ -184,6 +242,7 @@ class OllamaAiService(
             history = listOf(syntheticTurn),
             extraSystemPrompt = systemBlock,
             overrideOnly = false,
+            userName = userName,
         )
 
         if (log.isDebugEnabled) {
@@ -193,7 +252,7 @@ class OllamaAiService(
             }
         }
 
-        val response = chatModel.call(Prompt(voiceMessages, options(properties.voiceModelName)))
+        val response = chatModel.call(Prompt(voiceMessages, voiceOptions()))
         val raw = response.result.output.text ?: ""
         return postProcessor.process(raw)
     }
@@ -205,11 +264,13 @@ class OllamaAiService(
     private fun runVoicePassConversational(
         history: List<ConversationMessage>,
         extraSystemPrompt: String?,
+        userName: String?,
     ): String {
         val voiceMessages = promptBuilder.build(
             history = history,
             extraSystemPrompt = extraSystemPrompt?.takeIf { it.isNotBlank() },
             overrideOnly = false,
+            userName = userName,
         )
 
         if (log.isDebugEnabled) {
@@ -219,7 +280,7 @@ class OllamaAiService(
             }
         }
 
-        val response = chatModel.call(Prompt(voiceMessages, options(properties.voiceModelName)))
+        val response = chatModel.call(Prompt(voiceMessages, voiceOptions()))
         val raw = response.result.output.text ?: ""
         return postProcessor.process(raw)
     }
@@ -233,7 +294,7 @@ class OllamaAiService(
      */
     fun chat(history: List<ConversationMessage>): String {
         val messages = promptBuilder.build(history)
-        val response = chatModel.call(Prompt(messages, options(properties.modelName)))
+        val response = chatModel.call(Prompt(messages, legacyOptions()))
         val raw = response.result.output.text ?: ""
         return postProcessor.process(raw)
     }
@@ -241,19 +302,80 @@ class OllamaAiService(
     // -------------------- Internals -------------------- //
 
     /**
-     * Per-prompt [OllamaOptions] for [modelName]. Spring AI replaces yaml defaults with
-     * whatever is set here on a per-call basis, so the tuning knobs must be applied at
-     * every call site (which is why they live in one helper rather than being scattered).
+     * Per-pass [OllamaOptions]. Spring AI replaces yaml defaults with whatever is set
+     * here on a per-call basis, so the tuning knobs must be applied at every call site
+     * (which is why they live in dedicated helpers rather than being scattered).
+     *
+     * Each pass has its own sampling profile:
+     *  - [brainOptions]: tight (low temp + topP) so tool calls aren't hallucinated.
+     *  - [intentGateOptions]: deterministic (temp=0) + tiny token budget — single-word
+     *    classification.
+     *  - [voiceOptions]: warmer for natural persona prose.
+     *  - [legacyOptions]: untuned for the single-pass `/contexto-do-canal` summarizer.
      */
-    private fun options(modelName: String): OllamaOptions =
+    private fun brainOptions(): OllamaOptions =
         OllamaOptions.builder()
-            .model(modelName)
+            .model(properties.brainModelName)
+            .temperature(properties.performance.brainTemperature)
+            .topP(properties.performance.brainTopP)
+            .numCtx(properties.performance.numCtx)
+            .numPredict(properties.performance.numPredict)
+            .numThread(properties.performance.numThread)
+            .build()
+
+    private fun voiceOptions(): OllamaOptions =
+        OllamaOptions.builder()
+            .model(properties.voiceModelName)
+            .temperature(properties.performance.voiceTemperature)
+            .numCtx(properties.performance.numCtx)
+            .numPredict(properties.performance.numPredict)
+            .numThread(properties.performance.numThread)
+            .build()
+
+    private fun intentGateOptions(): OllamaOptions =
+        OllamaOptions.builder()
+            .model(properties.brainModelName)
+            .temperature(0.0)
+            .numCtx(properties.performance.numCtx.coerceAtMost(1024))
+            .numPredict(8)
+            .numThread(properties.performance.numThread)
+            .build()
+
+    private fun legacyOptions(): OllamaOptions =
+        OllamaOptions.builder()
+            .model(properties.modelName)
             .numCtx(properties.performance.numCtx)
             .numPredict(properties.performance.numPredict)
             .numThread(properties.performance.numThread)
             .build()
 
     private companion object {
+        /**
+         * Intent gate system prompt. Forces a single-word PT-BR classification of the
+         * last user turn. Returning "mod" routes through the tool-aware brain; anything
+         * else falls back to "chat" and bypasses the brain entirely, so a chatty model
+         * can't decide to moderate someone over a greeting.
+         */
+        val INTENT_GATE_INSTRUCTIONS = """
+            Você é um classificador binário. Olhe a mensagem do usuário e responda APENAS
+            uma palavra: "mod" ou "chat". Nada mais.
+
+            Responda "mod" quando a mensagem pede:
+            - uma ação de moderação contra um membro do Discord: mutar/silenciar/calar/
+              timeout, desmutar/destirar mute, expulsar/chutar/kick, banir/ban
+            - uma consulta a dados do Discord: info do servidor, contagem de membros,
+              permissões, busca de membro por ID
+
+            Responda "chat" para QUALQUER outra coisa:
+            - saudações ("oi", "olá", "bom dia"), despedidas, agradecimentos
+            - perguntas sobre o bot ("qual seu nome?", "você é uma IA?")
+            - elogios, declarações, opiniões, brincadeiras
+            - pedidos de história, conselho, conversa aleatória
+            - perguntas sobre jogos, lore, recomendações
+
+            Não explique. Não comente. Não use pontuação. APENAS "mod" ou "chat".
+        """.trimIndent()
+
         /** Sentinel returned by the brain when the user's message needs no tool action
          *  and no Discord-state lookup — the voice pass should answer purely from persona. */
         const val BRAIN_NO_ACTION = "Sem ação necessária."

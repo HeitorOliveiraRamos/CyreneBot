@@ -31,9 +31,39 @@ data class BotProperties(
     val performance: Performance = Performance(),
     val mentionContext: MentionContext = MentionContext(),
     val userInfo: UserInfo = UserInfo(),
+    /**
+     * When set to a non-blank Discord channel ID, the message listeners
+     * ([com.cyrene.discord.listener.MentionReplyListener] and
+     * [com.cyrene.discord.listener.ChatSessionListener]) ignore messages from any other
+     * channel. Used to scope the bot to a single staging channel during local testing.
+     * Leave unset/blank in production to listen everywhere.
+     */
+    val testChannelId: String? = null,
 ) {
     data class Reply(
         val cooldownSeconds: Long = 5,
+        val chain: ReplyChain = ReplyChain(),
+    )
+
+    /**
+     * Tuning for the per-mention reply-chain walker
+     * ([com.cyrene.discord.ReplyChainResolver]). The walker reconstructs prior Discord
+     * messages by following [net.dv8tion.jda.api.entities.Message.getMessageReference]
+     * pointers upward so multi-user reply threads carry context into the LLM prompt.
+     *
+     *  - [maxHops]: hard cap on chain depth. Once exceeded the walk stops and whatever was
+     *    collected is used.
+     *  - [budgetMs]: wall-clock budget for the whole walk. REST fallbacks can be slow; if
+     *    the budget is blown the walk stops and partial context is used.
+     *  - [cacheTtlMinutes]: how long the bot's own sent messages stay in
+     *    [com.cyrene.discord.util.BotReplyCache] so they can be served without REST.
+     *  - [cacheMaxSize]: LRU size cap for that cache.
+     */
+    data class ReplyChain(
+        val maxHops: Int = 10,
+        val budgetMs: Long = 400,
+        val cacheTtlMinutes: Long = 30,
+        val cacheMaxSize: Int = 2000,
     )
 
     data class Message(
@@ -55,11 +85,20 @@ data class BotProperties(
      *  - [numPredict]: hard cap on generated tokens. Prevents runaway replies.
      *  - [numThread]: CPU threads. Ignored when the model fits fully on GPU; set to your
      *    physical core count if any layers spill to CPU.
+     *  - [brainTemperature] / [brainTopP]: sampling for the brain pass and the intent
+     *    gate. Both are classification-like — should be tight. Raising these makes the
+     *    brain hallucinate tool calls more often, which is exactly what we want to avoid.
+     *  - [voiceTemperature]: sampling for the persona (voice) pass. Higher than brain —
+     *    natural prose benefits from some diversity. Too low → flat replies; too high →
+     *    persona drift.
      */
     data class Performance(
         val numCtx: Int = 4096,
         val numPredict: Int = 512,
         val numThread: Int = 8,
+        val brainTemperature: Double = 0.1,
+        val brainTopP: Double = 0.5,
+        val voiceTemperature: Double = 0.8,
     )
 
     /**

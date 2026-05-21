@@ -7,8 +7,11 @@ import com.cyrene.conversation.ConversationService
 import com.cyrene.conversation.MentionContextService
 import com.cyrene.conversation.MessageRole
 import com.cyrene.conversation.UserInfoService
+import com.cyrene.discord.ChainEntry
+import com.cyrene.discord.ReplyChainResolver
 import com.cyrene.discord.tools.DiscordToolContext
 import com.cyrene.discord.util.DiscordMessageSender
+import net.dv8tion.jda.api.entities.Message
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
 import org.slf4j.LoggerFactory
@@ -36,6 +39,7 @@ class MentionReplyListener(
     private val conversations: ConversationService,
     private val mentionContext: MentionContextService,
     private val userInfoService: UserInfoService,
+    private val replyChainResolver: ReplyChainResolver,
     private val properties: BotProperties,
     private val executor: Executor,
 ) : ListenerAdapter() {
@@ -46,7 +50,8 @@ class MentionReplyListener(
     override fun onMessageReceived(event: MessageReceivedEvent) {
         if (event.author.isBot) return
         if (conversations.isInActiveSession(event.author.id, event.channel.id)) return
-//        if (event.channel.id != "1377827826903941231") return
+        val testChannelId = properties.testChannelId
+        if (!testChannelId.isNullOrBlank() && event.channel.id != testChannelId) return
 
         val selfUser = event.jda.selfUser
         if (selfUser !in event.message.mentions.users) return
@@ -78,29 +83,6 @@ class MentionReplyListener(
             channelId = event.channel.id,
         )
 
-        // Build the history fed to the LLM as a SINGLE user turn — no prior @-mention
-        // context. The cached UserInfo profile carries the persistent "who is this" data
-        // that the brain previously had to fish out via tool calls.
-        val history = buildList {
-            if (referenced != null && !referenced.author.isBot) {
-                add(
-                    ConversationMessage(
-                        conversationId = 0L,
-                        role = MessageRole.USER,
-                        content = "[em resposta a ${referenced.author.effectiveName}: " +
-                            "\"${referenced.contentRaw.take(500)}\"]",
-                    )
-                )
-            }
-            add(
-                ConversationMessage(
-                    conversationId = 0L,
-                    role = MessageRole.USER,
-                    content = withoutMention,
-                )
-            )
-        }
-
         CompletableFuture
             .supplyAsync(
                 {
@@ -108,10 +90,19 @@ class MentionReplyListener(
                     // baseline summarizer call doesn't block the gateway thread.
                     val resolved = userInfoService.resolveForEvent(event)
                     val systemPrompt = resolved?.let { userInfoService.assembleSystemPrompt(it.info) }
+
+                    // Reconstruct the Discord reply chain (oldest → newest). Bounded by
+                    // maxHops + budget so worst-case latency stays predictable; safe to
+                    // call here because we're already off the gateway thread.
+                    val chain = replyChainResolver.resolveChain(event.message, selfUser.id)
+                    val currentName = resolved?.info?.effectiveName ?: event.author.effectiveName
+                    val history = buildHistory(chain, referenced, currentName, withoutMention)
+
                     val reply = ai.chatBrainAndVoice(
                         history = history,
                         toolContext = toolContext,
                         extraSystemPrompt = systemPrompt,
+                        userName = resolved?.info?.effectiveName,
                     )
                     PreparedReply(reply, resolved?.guildId)
                 },
@@ -139,6 +130,60 @@ class MentionReplyListener(
                 ).queue()
                 null
             }
+    }
+
+    /**
+     * Assembles the LLM history from the reply chain (when present) plus the current
+     * user turn. Every human/other-bot turn is prefixed with `[name]:` so the voice
+     * model can tell speakers apart in multi-user chains.
+     *
+     * Fallback when the chain is empty:
+     *  - if the message is a direct reply to another human, keep the legacy
+     *    `[em resposta a ...]` snippet so single-hop replies still carry that context
+     *    even when chain resolution couldn't walk further.
+     *  - otherwise just the current turn (the original stateless behavior).
+     */
+    private fun buildHistory(
+        chain: List<ChainEntry>,
+        referenced: Message?,
+        currentUserName: String,
+        currentContent: String,
+    ): List<ConversationMessage> = buildList {
+        if (chain.isNotEmpty()) {
+            chain.forEach { entry ->
+                val text = when {
+                    entry.role == MessageRole.ASSISTANT -> entry.content
+                    entry.isOtherBot -> "[outro bot ${entry.authorName}]: ${entry.content}"
+                    else -> "[${entry.authorName}]: ${entry.content}"
+                }
+                add(ConversationMessage(conversationId = 0L, role = entry.role, content = text))
+            }
+            add(
+                ConversationMessage(
+                    conversationId = 0L,
+                    role = MessageRole.USER,
+                    content = "[$currentUserName]: $currentContent",
+                )
+            )
+        } else {
+            if (referenced != null && !referenced.author.isBot) {
+                add(
+                    ConversationMessage(
+                        conversationId = 0L,
+                        role = MessageRole.USER,
+                        content = "[em resposta a ${referenced.author.effectiveName}: " +
+                            "\"${referenced.contentRaw.take(500)}\"]",
+                    )
+                )
+            }
+            add(
+                ConversationMessage(
+                    conversationId = 0L,
+                    role = MessageRole.USER,
+                    content = currentContent,
+                )
+            )
+        }
     }
 
     private data class PreparedReply(val reply: String, val guildId: String?)

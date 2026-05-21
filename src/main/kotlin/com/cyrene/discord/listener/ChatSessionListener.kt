@@ -1,6 +1,7 @@
 package com.cyrene.discord.listener
 
 import com.cyrene.ai.OllamaAiService
+import com.cyrene.config.BotProperties
 import com.cyrene.conversation.ConversationMessage
 import com.cyrene.conversation.ConversationService
 import com.cyrene.conversation.MessageRole
@@ -36,6 +37,7 @@ class ChatSessionListener(
     private val ai: OllamaAiService,
     private val sender: DiscordMessageSender,
     private val userInfoService: UserInfoService,
+    private val properties: BotProperties,
     private val executor: Executor,
 ) : ListenerAdapter() {
 
@@ -47,6 +49,9 @@ class ChatSessionListener(
         val message = event.message
         val userId = message.author.id
         val channelId = message.channel.id
+
+        val testChannelId = properties.testChannelId
+        if (!testChannelId.isNullOrBlank() && channelId != testChannelId) return
 
         val active = conversations.activeConversation(userId, channelId) ?: return
         val conversationId = active.id ?: return
@@ -77,6 +82,7 @@ class ChatSessionListener(
                         history = historyForAi,
                         toolContext = toolContext,
                         extraSystemPrompt = systemPrompt,
+                        userName = resolved?.info?.effectiveName,
                     )
                     PreparedReply(reply, resolved?.guildId)
                 },

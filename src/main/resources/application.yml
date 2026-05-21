@@ -50,8 +50,23 @@ bot:
     num-ctx: ${OLLAMA_NUM_CTX:4096}
     num-predict: ${OLLAMA_NUM_PREDICT:512}
     num-thread: ${OLLAMA_NUM_THREAD:8}
+    # Brain pass + intent gate are classification-like: keep sampling tight so the model
+    # doesn't hallucinate tool calls on a greeting.
+    brain-temperature: ${OLLAMA_BRAIN_TEMP:0.1}
+    brain-top-p: ${OLLAMA_BRAIN_TOP_P:0.5}
+    # Voice pass is prose: a bit warmer for natural persona. Drop toward 0.5 if it drifts.
+    voice-temperature: ${OLLAMA_VOICE_TEMP:0.8}
   reply:
     cooldown-seconds: 5
+    # Reply-chain walker: reconstructs the Discord reply thread leading up to a mention so
+    # multi-user back-and-forth carries context into the LLM prompt without persisting
+    # anything. Hop 1 is free (Discord ships it inline with the gateway event); deeper
+    # hops use an in-memory cache of bot-authored messages and fall back to REST.
+    chain:
+      max-hops: ${REPLY_CHAIN_MAX_HOPS:10}
+      budget-ms: ${REPLY_CHAIN_BUDGET_MS:400}
+      cache-ttl-minutes: ${REPLY_CHAIN_CACHE_TTL_MIN:30}
+      cache-max-size: ${REPLY_CHAIN_CACHE_MAX:2000}
   message:
     max-length: 2000
     can-mention-here-and-everyone: false
@@ -72,6 +87,9 @@ bot:
     refresh-cron: ${USER_INFO_REFRESH_CRON:0 0 4 * * *}
     personality-refresh-every-exchanges: ${USER_INFO_PERSONALITY_EVERY:10}
     personality-sample-size: ${USER_INFO_PERSONALITY_SAMPLE:10}
+  # When set, message listeners only respond in this channel — used to scope the bot
+  # to a staging channel during local testing. Leave blank/unset to listen everywhere.
+  test-channel-id: ${TEST_CHANNEL_ID:}
 
 logging:
   level:

@@ -142,9 +142,11 @@ class UserInfoService(
      * name reminder followed by the rendered profile.
      */
     fun assembleSystemPrompt(info: UserInfo): String {
-        val callerLine = "O usuário com quem você está falando se chama " +
-            "${info.effectiveName}. Inclua o nome dele na resposta quando fizer sentido, " +
-            "no lugar de qualquer placeholder como {nome}."
+        // The persona file's `{nome}` token is already substituted with this same name
+        // by PromptBuilder before the voice pass runs, so the model sees concrete
+        // greetings ("Oi, Léo. Diz aí.") rather than templates. We still emit this line
+        // so the brain pass (which doesn't load the persona) knows who the caller is.
+        val callerLine = "O usuário com quem você está falando se chama ${info.effectiveName}."
         val profile = renderForPrompt(info)
         return listOf(callerLine, profile).joinToString("\n\n")
     }
