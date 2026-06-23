@@ -79,14 +79,6 @@ bot:
     max-messages: ${MENTION_CTX_MAX:10}
     recency-minutes: ${MENTION_CTX_RECENCY_MIN:30}
     retention-hours: ${MENTION_CTX_RETENTION_H:24}
-  # Cached per-(user, guild) profile populated on first @-mention so the brain doesn't
-  # have to call getCallerInfo / getCallerModerationPermissions on every interaction.
-  # A daily cron refreshes name/role/permissions; personality summary is regenerated
-  # every N persisted exchanges.
-  user-info:
-    refresh-cron: ${USER_INFO_REFRESH_CRON:0 0 4 * * *}
-    personality-refresh-every-exchanges: ${USER_INFO_PERSONALITY_EVERY:10}
-    personality-sample-size: ${USER_INFO_PERSONALITY_SAMPLE:10}
   # When set, message listeners only respond in this channel — used to scope the bot
   # to a staging channel during local testing. Leave blank/unset to listen everywhere.
   test-channel-id: ${TEST_CHANNEL_ID:}

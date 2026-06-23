@@ -30,7 +30,6 @@ data class BotProperties(
     val context: Context = Context(),
     val performance: Performance = Performance(),
     val mentionContext: MentionContext = MentionContext(),
-    val userInfo: UserInfo = UserInfo(),
     /**
      * When set to a non-blank Discord channel ID, the message listeners
      * ([com.cyrene.discord.listener.MentionReplyListener] and
@@ -117,21 +116,5 @@ data class BotProperties(
         val maxMessages: Int = 10,
         val recencyMinutes: Long = 30,
         val retentionHours: Long = 24,
-    )
-
-    /**
-     * Tuning for the cached per-(user, guild) profile populated on first mention
-     * ([com.cyrene.conversation.UserInfoService]).
-     *
-     *  - [refreshCron]: when [com.cyrene.conversation.UserInfoRefreshScheduler] runs to
-     *    re-sync names/roles/permissions from JDA. Default: daily at 04:00.
-     *  - [personalityRefreshEveryExchanges]: after every N persisted exchanges, the
-     *    personality summary is regenerated from the user's recent question/answer pairs.
-     *  - [personalitySampleSize]: how many recent exchanges are fed to the summarizer.
-     */
-    data class UserInfo(
-        val refreshCron: String = "0 0 4 * * *",
-        val personalityRefreshEveryExchanges: Int = 10,
-        val personalitySampleSize: Int = 10,
     )
 }

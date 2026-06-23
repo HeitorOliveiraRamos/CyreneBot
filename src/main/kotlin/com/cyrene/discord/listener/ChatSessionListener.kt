@@ -5,7 +5,7 @@ import com.cyrene.config.BotProperties
 import com.cyrene.conversation.ConversationMessage
 import com.cyrene.conversation.ConversationService
 import com.cyrene.conversation.MessageRole
-import com.cyrene.conversation.UserInfoService
+import com.cyrene.conversation.UsuarioService
 import com.cyrene.discord.tools.DiscordToolContext
 import com.cyrene.discord.util.DiscordMessageSender
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent
@@ -19,12 +19,10 @@ import java.util.concurrent.Executor
  * Forwards messages from users with an active `/iniciar-conversa` session to Ollama,
  * persisting both sides of the exchange as a single combined row.
  *
- * Like the @-mention path, this listener injects the cached
- * [com.cyrene.conversation.UserInfo] profile as a system block so the voice model knows
- * the user's name (avoiding leaked `{nome}` placeholders from the persona examples) and
- * the brain has cached permission flags without needing to call tools. In DM sessions
- * the profile is stored under the [UserInfoService.DM_GUILD] sentinel and has no
- * role/permissions.
+ * Like the @-mention path, this listener injects the user block resolved by
+ * [UsuarioService] as a system block so the voice model knows the user's name (avoiding
+ * leaked `{nome}` placeholders from the persona examples) and the brain sees the caller's
+ * live role/permissions plus whatever the user asked the bot to remember.
  *
  * The user turn is no longer persisted before the AI call — exchanges are written as a
  * single combined row after the reply lands. A crash mid-call therefore loses the
@@ -36,7 +34,7 @@ class ChatSessionListener(
     private val conversations: ConversationService,
     private val ai: OllamaAiService,
     private val sender: DiscordMessageSender,
-    private val userInfoService: UserInfoService,
+    private val usuarioService: UsuarioService,
     private val properties: BotProperties,
     private val executor: Executor,
 ) : ListenerAdapter() {
@@ -76,29 +74,22 @@ class ChatSessionListener(
         CompletableFuture
             .supplyAsync(
                 {
-                    val resolved = userInfoService.resolveForEvent(event)
-                    val systemPrompt = resolved?.let { userInfoService.assembleSystemPrompt(it.info) }
-                    val reply = ai.chatBrainAndVoice(
+                    val resolved = usuarioService.resolveForEvent(event)
+                    ai.chatBrainAndVoice(
                         history = historyForAi,
                         toolContext = toolContext,
-                        extraSystemPrompt = systemPrompt,
-                        userName = resolved?.info?.effectiveName,
+                        extraSystemPrompt = resolved?.systemPrompt,
+                        userName = resolved?.effectiveName,
                     )
-                    PreparedReply(reply, resolved?.guildId)
                 },
                 executor,
             )
-            .thenAccept { prepared ->
-                val persisted = conversations.recordExchange(conversationId, content, prepared.reply)
+            .thenAccept { reply ->
+                val persisted = conversations.recordExchange(conversationId, content, reply)
                 if (!persisted) {
                     log.debug("Skipped recording exchange for conv {} — no longer active", conversationId)
                 }
-                try {
-                    prepared.guildId?.let { userInfoService.incrementExchanges(userId, it) }
-                } catch (e: Exception) {
-                    log.warn("Failed to bump user_info exchange counter for {}", userId, e)
-                }
-                sender.replyLong(message, prepared.reply)
+                sender.replyLong(message, reply)
             }
             .exceptionally { ex ->
                 log.error("Failed to process chat-session message for conv {}", conversationId, ex)
@@ -107,6 +98,4 @@ class ChatSessionListener(
                 null
             }
     }
-
-    private data class PreparedReply(val reply: String, val guildId: String?)
 }

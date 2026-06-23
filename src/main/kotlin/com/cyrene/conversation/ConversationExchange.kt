@@ -20,19 +20,19 @@ import java.time.OffsetDateTime
  * turn.
  */
 @Entity
-@Table(name = "conversation_exchange")
+@Table(name = "troca_conversa")
 class ConversationExchange(
 
-    @Column(name = "conversation_id", nullable = false)
+    @Column(name = "conversa_id", nullable = false)
     var conversationId: Long,
 
-    @Column(name = "user_message", columnDefinition = "TEXT")
+    @Column(name = "mensagem_usuario", columnDefinition = "TEXT")
     var userMessage: String?,
 
-    @Column(name = "assistant_reply", nullable = false, columnDefinition = "TEXT")
+    @Column(name = "resposta_assistente", nullable = false, columnDefinition = "TEXT")
     var assistantReply: String,
 
-    @Column(name = "created_at", nullable = false)
+    @Column(name = "criado_em", nullable = false)
     var createdAt: OffsetDateTime = OffsetDateTime.now(),
 
     @Id

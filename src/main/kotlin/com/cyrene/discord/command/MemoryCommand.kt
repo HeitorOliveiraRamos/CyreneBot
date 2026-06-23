@@ -1,50 +1,53 @@
 package com.cyrene.discord.command
 
-import com.cyrene.conversation.UserProfileService
+import com.cyrene.conversation.UsuarioService
 import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent
-import net.dv8tion.jda.api.interactions.commands.OptionType
 import net.dv8tion.jda.api.interactions.commands.build.CommandData
 import net.dv8tion.jda.api.interactions.commands.build.Commands
+import net.dv8tion.jda.api.interactions.components.text.TextInput
+import net.dv8tion.jda.api.interactions.components.text.TextInputStyle
+import net.dv8tion.jda.api.interactions.modals.Modal
 import org.springframework.stereotype.Component
 
 /**
- * Lets a user opt into (or out of) the bot remembering things about them. Memory is OFF by
- * default for privacy; this is the only way to turn it on. Turning it off wipes everything
- * the bot has stored about the user (summary + remembered facts).
+ * Abre um modal onde o usuário escreve, com as próprias palavras, o que quer que o bot lembre
+ * dele entre as conversas. O campo vem pré-preenchido com a memória atual (se houver), então o
+ * mesmo comando serve para definir, editar e — enviando o campo vazio — apagar.
+ *
+ * A submissão do modal é tratada em [com.cyrene.discord.listener.MemoryModalListener].
  */
 @Component
 class MemoryCommand(
-    private val userProfileService: UserProfileService,
+    private val usuarioService: UsuarioService,
 ) : SlashCommand {
 
     override val name = "memoria"
 
     override val definition: CommandData =
-        Commands.slash(name, "Controla se eu posso lembrar de coisas sobre você entre conversas")
-            .addOption(
-                OptionType.BOOLEAN,
-                "ativar",
-                "true para eu começar a lembrar de você; false para eu esquecer tudo",
-                true,
-            )
+        Commands.slash(name, "Escolha o que eu vou lembrar sobre você entre as conversas")
 
     override fun handle(event: SlashCommandInteractionEvent) {
         if (event.user.isBot) return
-        val enable = event.getOption("ativar")?.asBoolean ?: return
-        val userId = event.user.id
 
-        if (enable) {
-            userProfileService.enableMemory(userId)
-            event.reply(
-                "Pronto, amor. A partir de agora eu vou guardar o que for importante sobre você " +
-                    "para lembrar nas nossas próximas conversas. Use `/memoria ativar:false` quando " +
-                    "quiser que eu esqueça tudo.",
-            ).setEphemeral(true).queue()
-        } else {
-            userProfileService.disableMemory(userId)
-            event.reply(
-                "Tudo bem. Apaguei tudo o que eu lembrava sobre você e não vou guardar mais nada.",
-            ).setEphemeral(true).queue()
-        }
+        val atual = usuarioService.memoriaDe(event.user.id)
+
+        val campo = TextInput.create(INPUT_ID, "O que você quer que eu lembre de você?", TextInputStyle.PARAGRAPH)
+            .setPlaceholder("Ex.: meu nome é Léo, sou alérgico a amendoim, gosto de Honkai...")
+            .setRequired(false)
+            .setMaxLength(MAX_LENGTH)
+            .apply { atual?.takeIf { it.isNotBlank() }?.let { setValue(it) } }
+            .build()
+
+        val modal = Modal.create(MODAL_ID, "Memória")
+            .addComponents(net.dv8tion.jda.api.interactions.components.ActionRow.of(campo))
+            .build()
+
+        event.replyModal(modal).queue()
+    }
+
+    companion object {
+        const val MODAL_ID = "memoria-modal"
+        const val INPUT_ID = "memoria-texto"
+        const val MAX_LENGTH = 1000
     }
 }

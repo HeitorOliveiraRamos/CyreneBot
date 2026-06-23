@@ -6,6 +6,7 @@ import com.cyrene.conversation.MessageRole
 import com.cyrene.discord.tools.DiscordToolContext
 import org.slf4j.LoggerFactory
 import org.springframework.ai.chat.client.ChatClient
+import org.springframework.ai.chat.messages.Message
 import org.springframework.ai.chat.messages.SystemMessage
 import org.springframework.ai.chat.messages.UserMessage
 import org.springframework.ai.chat.prompt.Prompt
@@ -136,12 +137,7 @@ class OllamaAiService(
 
         val messages = promptBuilder.build(history, brainSystem, overrideOnly = true)
 
-        if (log.isDebugEnabled) {
-            log.debug("Brain pass: {} messages, history size={}", messages.size, history.size)
-            messages.forEachIndexed { i, m ->
-                log.debug("  [{}] {} :: {}", i, m.javaClass.simpleName, m.text.take(300))
-            }
-        }
+        logPrompt("brain", messages)
 
         val raw = chatClient.prompt(Prompt(messages))
             .options(brainOptions())
@@ -245,12 +241,7 @@ class OllamaAiService(
             userName = userName,
         )
 
-        if (log.isDebugEnabled) {
-            log.debug("Voice pass (focused): {} messages", voiceMessages.size)
-            voiceMessages.forEachIndexed { i, m ->
-                log.debug("  [{}] {} :: {}", i, m.javaClass.simpleName, m.text.take(300))
-            }
-        }
+        logPrompt("voice/focused", voiceMessages)
 
         val response = chatModel.call(Prompt(voiceMessages, voiceOptions()))
         val raw = response.result.output.text ?: ""
@@ -273,12 +264,7 @@ class OllamaAiService(
             userName = userName,
         )
 
-        if (log.isDebugEnabled) {
-            log.debug("Voice pass (conversational): {} messages", voiceMessages.size)
-            voiceMessages.forEachIndexed { i, m ->
-                log.debug("  [{}] {} :: {}", i, m.javaClass.simpleName, m.text.take(300))
-            }
-        }
+        logPrompt("voice/conversational", voiceMessages)
 
         val response = chatModel.call(Prompt(voiceMessages, voiceOptions()))
         val raw = response.result.output.text ?: ""
@@ -300,6 +286,19 @@ class OllamaAiService(
     }
 
     // -------------------- Internals -------------------- //
+
+    /**
+     * Logs the full prompt being sent to the model — every message, untruncated, with its
+     * role — so the exact text reaching the LLM is visible in the logs. Gated on DEBUG
+     * (com.cyrene is at DEBUG by default); raise the level if you don't want prompt dumps.
+     */
+    private fun logPrompt(tag: String, messages: List<Message>) {
+        if (!log.isDebugEnabled) return
+        val rendered = messages.joinToString("\n") { m ->
+            "  ── ${m.messageType} ──\n${m.text}"
+        }
+        log.debug("Prompt [{}] ({} mensagens):\n{}", tag, messages.size, rendered)
+    }
 
     /**
      * Per-pass [OllamaOptions]. Spring AI replaces yaml defaults with whatever is set

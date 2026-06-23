@@ -6,7 +6,7 @@ import com.cyrene.conversation.ConversationMessage
 import com.cyrene.conversation.ConversationService
 import com.cyrene.conversation.MentionContextService
 import com.cyrene.conversation.MessageRole
-import com.cyrene.conversation.UserInfoService
+import com.cyrene.conversation.UsuarioService
 import com.cyrene.discord.ChainEntry
 import com.cyrene.discord.ReplyChainResolver
 import com.cyrene.discord.tools.DiscordToolContext
@@ -25,9 +25,9 @@ import java.util.concurrent.TimeUnit
  * is already in an active `/iniciar-conversa` session (the chat listener handles those).
  *
  * Stateless prompting: each mention is answered without prior @-mention history. Instead,
- * a cached per-(user, guild) profile (effective name, highest role, permission flags,
- * personality summary) is injected as a system block via [UserInfoService]. The exchange
- * is still persisted afterwards so the personality summary can be refreshed periodically.
+ * the user block resolved by [UsuarioService] (effective name, live highest role and
+ * permissions, plus whatever the user asked the bot to remember) is injected as a system
+ * block. The exchange is still persisted afterwards for auditability.
  *
  * Moderation tool authority is NOT trusted from the cached flags — `DiscordTools.executeMod`
  * still re-verifies caller permissions live against JDA before acting.
@@ -38,7 +38,7 @@ class MentionReplyListener(
     private val sender: DiscordMessageSender,
     private val conversations: ConversationService,
     private val mentionContext: MentionContextService,
-    private val userInfoService: UserInfoService,
+    private val usuarioService: UsuarioService,
     private val replyChainResolver: ReplyChainResolver,
     private val properties: BotProperties,
     private val executor: Executor,
@@ -86,42 +86,40 @@ class MentionReplyListener(
         CompletableFuture
             .supplyAsync(
                 {
-                    // Resolve / create the cached user profile on the AI executor so the
-                    // baseline summarizer call doesn't block the gateway thread.
-                    val resolved = userInfoService.resolveForEvent(event)
-                    val systemPrompt = resolved?.let { userInfoService.assembleSystemPrompt(it.info) }
+                    // Resolve / upsert the user row on the AI executor so the JDA lookups
+                    // don't block the gateway thread.
+                    val resolved = usuarioService.resolveForEvent(event)
 
                     // Reconstruct the Discord reply chain (oldest → newest). Bounded by
                     // maxHops + budget so worst-case latency stays predictable; safe to
                     // call here because we're already off the gateway thread.
                     val chain = replyChainResolver.resolveChain(event.message, selfUser.id)
-                    val currentName = resolved?.info?.effectiveName ?: event.author.effectiveName
+                    val currentName = resolved?.effectiveName ?: event.author.effectiveName
                     val history = buildHistory(chain, referenced, currentName, withoutMention)
 
-                    val reply = ai.chatBrainAndVoice(
+                    ai.chatBrainAndVoice(
                         history = history,
                         toolContext = toolContext,
-                        extraSystemPrompt = systemPrompt,
-                        userName = resolved?.info?.effectiveName,
+                        extraSystemPrompt = resolved?.systemPrompt,
+                        userName = resolved?.effectiveName,
                     )
-                    PreparedReply(reply, resolved?.guildId)
                 },
                 executor,
             )
-            .thenAccept { prepared ->
+            .thenAccept { reply ->
                 try {
                     mentionContext.recordExchange(
                         userId = event.author.id,
                         guildId = if (event.isFromGuild) event.guild.id else null,
                         channelId = event.channel.id,
                         userMessage = withoutMention,
-                        assistantReply = prepared.reply,
+                        assistantReply = reply,
                     )
-                    prepared.guildId?.let { userInfoService.incrementExchanges(event.author.id, it) }
+
                 } catch (e: Exception) {
                     log.warn("Failed to persist mention exchange for user {}", event.author.id, e)
                 }
-                sender.replyLong(event.message, prepared.reply)
+                sender.replyLong(event.message, reply)
             }
             .exceptionally { ex ->
                 log.error("MentionReplyListener failed", ex)
@@ -185,6 +183,4 @@ class MentionReplyListener(
             )
         }
     }
-
-    private data class PreparedReply(val reply: String, val guildId: String?)
 }

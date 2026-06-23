@@ -9,22 +9,22 @@ import jakarta.persistence.Table
 import java.time.OffsetDateTime
 
 @Entity
-@Table(name = "conversation")
+@Table(name = "conversa")
 class Conversation(
 
-    @Column(name = "user_id", nullable = false)
+    @Column(name = "usuario_id", nullable = false)
     var userId: String,
 
-    @Column(name = "channel_id", nullable = false)
+    @Column(name = "canal_id", nullable = false)
     var channelId: String,
 
-    @Column(name = "active", nullable = false)
+    @Column(name = "ativa", nullable = false)
     var active: Boolean = true,
 
-    @Column(name = "started_at", nullable = false)
+    @Column(name = "iniciada_em", nullable = false)
     var startedAt: OffsetDateTime = OffsetDateTime.now(),
 
-    @Column(name = "ended_at")
+    @Column(name = "encerrada_em")
     var endedAt: OffsetDateTime? = null,
 
     @Id
