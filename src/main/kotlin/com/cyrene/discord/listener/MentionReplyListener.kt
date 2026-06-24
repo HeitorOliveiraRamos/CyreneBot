@@ -54,8 +54,20 @@ class MentionReplyListener(
         if (!testChannelId.isNullOrBlank() && event.channel.id != testChannelId) return
 
         val selfUser = event.jda.selfUser
-        if (selfUser !in event.message.mentions.users) return
+        // Allow processing for either an explicit mention OR when the incoming
+        // message is a reply to the bot's own message (so users can continue a
+        // mini-chat by replying without re-mentioning).
+        val raw = event.message.contentRaw
+        val referenced = event.message.referencedMessage
+        val isMention = selfUser in event.message.mentions.users
+        val isReplyToSelf = referenced?.author?.id == selfUser.id
+        if (!isMention && !isReplyToSelf) return
+        if (referenced != null && referenced.author.isBot && referenced.author.id != selfUser.id) {
+            // Replying to a different bot — ignore.
+            return
+        }
 
+        val withoutMention = raw.replace("<@${selfUser.id}>", "").trim()
         val now = System.currentTimeMillis()
         val userId = event.author.id
         val cooldownSeconds = properties.reply.cooldownSeconds
@@ -68,14 +80,6 @@ class MentionReplyListener(
             return
         }
         cooldowns[userId] = now
-
-        val raw = event.message.contentRaw
-        val withoutMention = raw.replace("<@${selfUser.id}>", "").trim()
-        val referenced = event.message.referencedMessage
-        if (referenced != null && referenced.author.isBot && referenced.author.id != selfUser.id) {
-            // Replying to a different bot — ignore.
-            return
-        }
 
         val toolContext = DiscordToolContext(
             callerUserId = event.author.id,
@@ -95,7 +99,7 @@ class MentionReplyListener(
                     // call here because we're already off the gateway thread.
                     val chain = replyChainResolver.resolveChain(event.message, selfUser.id)
                     val currentName = resolved?.effectiveName ?: event.author.effectiveName
-                    val history = buildHistory(chain, referenced, currentName, withoutMention)
+                    val history = buildHistory(chain, referenced, currentName, withoutMention, selfUser.id)
 
                     ai.chatBrainAndVoice(
                         history = history,
@@ -146,6 +150,7 @@ class MentionReplyListener(
         referenced: Message?,
         currentUserName: String,
         currentContent: String,
+        selfUserId: String,
     ): List<ConversationMessage> = buildList {
         if (chain.isNotEmpty()) {
             chain.forEach { entry ->
@@ -164,15 +169,29 @@ class MentionReplyListener(
                 )
             )
         } else {
-            if (referenced != null && !referenced.author.isBot) {
-                add(
-                    ConversationMessage(
-                        conversationId = 0L,
-                        role = MessageRole.USER,
-                        content = "[em resposta a ${referenced.author.effectiveName}: " +
-                            "\"${referenced.contentRaw.take(500)}\"]",
+            // If chain resolution failed but the message is a direct reply, include
+            // the referenced message as context. If the referenced message was from
+            // Cyrene, add it as an ASSISTANT turn; otherwise for a human add the
+            // legacy "[em resposta a ...]" snippet.
+            if (referenced != null) {
+                if (referenced.author.id == selfUserId) {
+                    add(
+                        ConversationMessage(
+                            conversationId = 0L,
+                            role = MessageRole.ASSISTANT,
+                            content = referenced.contentRaw,
+                        )
                     )
-                )
+                } else if (!referenced.author.isBot) {
+                    add(
+                        ConversationMessage(
+                            conversationId = 0L,
+                            role = MessageRole.USER,
+                            content = "[em resposta a ${referenced.author.effectiveName}: " +
+                                "\"${referenced.contentRaw.take(500)}\"]",
+                        )
+                    )
+                }
             }
             add(
                 ConversationMessage(
