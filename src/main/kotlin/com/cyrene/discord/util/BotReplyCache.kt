@@ -7,14 +7,17 @@ import java.util.Collections
 import java.util.concurrent.TimeUnit
 
 /**
- * In-memory LRU of messages the bot has just sent, keyed by Discord message id. Populated
- * from [DiscordMessageSender] success callbacks so reply-chain walks can short-circuit
- * lookups for Cyrene's own prior turns without paying a REST round-trip.
+ * In-memory LRU of messages relevant to reply-chain resolution, keyed by Discord message
+ * id. Populated from [DiscordMessageSender]: both Cyrene's own sent replies AND the human
+ * message each reply answered. That pairing means a reply thread the bot has participated
+ * in is fully cached, so [com.cyrene.discord.ReplyChainResolver] can walk it without a
+ * single REST round-trip (the REST fallback is only needed after a restart or once an
+ * entry has expired).
  *
- * Only the data the chain walker needs is retained — not the full JDA [Message] — to avoid
- * pinning JDA-internal references. Entries expire on read (lazy TTL check) and the map is
- * size-capped via [LinkedHashMap.removeEldestEntry], so no background eviction thread is
- * required.
+ * Only the data the chain walker needs is retained — author identity, content and the
+ * parent pointer — not the full JDA [Message], to avoid pinning JDA-internal references.
+ * Entries expire on read (lazy TTL check) and the map is size-capped via
+ * [LinkedHashMap.removeEldestEntry], so no background eviction thread is required.
  */
 @Component
 class BotReplyCache(properties: BotProperties) {
@@ -24,6 +27,9 @@ class BotReplyCache(properties: BotProperties) {
 
     private data class Entry(
         val content: String,
+        val authorId: String,
+        val authorName: String,
+        val isBot: Boolean,
         val parentMessageId: String?,
         val parentChannelId: String?,
         val storedAtNanos: Long,
@@ -36,11 +42,16 @@ class BotReplyCache(properties: BotProperties) {
         },
     )
 
-    /** Records a message the bot just sent (success callback from JDA). */
-    fun put(sent: Message) {
-        val ref = sent.messageReference
-        cache[sent.id] = Entry(
-            content = sent.contentRaw,
+    /** Records a message relevant to reply-chain walks (a bot reply or a human message
+     *  the bot answered). Safe to call repeatedly for the same id — it just refreshes. */
+    fun put(message: Message) {
+        val ref = message.messageReference
+        val author = message.author
+        cache[message.id] = Entry(
+            content = message.contentRaw,
+            authorId = author.id,
+            authorName = author.effectiveName,
+            isBot = author.isBot,
             parentMessageId = ref?.messageId,
             parentChannelId = ref?.channelId,
             storedAtNanos = System.nanoTime(),
@@ -57,6 +68,9 @@ class BotReplyCache(properties: BotProperties) {
         return CachedBotMessage(
             id = messageId,
             content = entry.content,
+            authorId = entry.authorId,
+            authorName = entry.authorName,
+            isBot = entry.isBot,
             parentMessageId = entry.parentMessageId,
             parentChannelId = entry.parentChannelId,
         )
@@ -67,6 +81,9 @@ class BotReplyCache(properties: BotProperties) {
 data class CachedBotMessage(
     val id: String,
     val content: String,
+    val authorId: String,
+    val authorName: String,
+    val isBot: Boolean,
     val parentMessageId: String?,
     val parentChannelId: String?,
 )

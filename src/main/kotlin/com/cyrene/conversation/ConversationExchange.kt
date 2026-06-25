@@ -10,8 +10,7 @@ import java.time.OffsetDateTime
 
 /**
  * One full question/answer turn in a `/iniciar-conversa` session. Replaces the legacy
- * per-role rows in `conversation_message`. Matches the shape of [MentionMessage] so both
- * persistence paths look the same.
+ * per-role rows in `conversation_message`.
  *
  * [userMessage] is nullable because the opening greeting recorded by
  * [ConversationService.startSession] has no user counterpart — only the assistant's

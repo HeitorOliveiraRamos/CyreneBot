@@ -2,7 +2,6 @@ package com.cyrene.discord.util
 
 import com.cyrene.config.BotProperties
 import net.dv8tion.jda.api.entities.Message
-import net.dv8tion.jda.api.entities.channel.middleman.MessageChannel
 import org.springframework.stereotype.Component
 
 @Component
@@ -22,16 +21,10 @@ class DiscordMessageSender(
      */
     private val blankFallback = "Pronto."
 
-    fun sendLong(channel: MessageChannel, content: String) {
-        if (containsBlockedMention(content)) {
-            channel.sendMessage("não posso fazer isso").queue(botReplyCache::put)
-            return
-        }
-        val safe = content.ifBlank { blankFallback }
-        split(safe).forEach { channel.sendMessage(it).queue(botReplyCache::put) }
-    }
-
     fun replyLong(original: Message, content: String) {
+        // Cache the human message we're replying to so the next turn's reply-chain walk
+        // resolves this hop from memory instead of a REST fetch.
+        botReplyCache.put(original)
         if (containsBlockedMention(content)) {
             original.reply("Não posso fazer isso").queue(botReplyCache::put)
             return

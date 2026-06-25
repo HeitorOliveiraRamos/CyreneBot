@@ -59,26 +59,22 @@ bot:
   reply:
     cooldown-seconds: 5
     # Reply-chain walker: reconstructs the Discord reply thread leading up to a mention so
-    # multi-user back-and-forth carries context into the LLM prompt without persisting
-    # anything. Hop 1 is free (Discord ships it inline with the gateway event); deeper
-    # hops use an in-memory cache of bot-authored messages and fall back to REST.
+    # the back-and-forth carries context into the LLM prompt without persisting anything.
+    # A fresh @mention has no reply pointer, so it starts clean — separate threads never
+    # mix. Hop 1 is free (inline with the event); deeper hops use an in-memory cache of
+    # BOTH Cyrene's replies and the human messages she answered, falling back to REST only
+    # on a cold cache (restart). max-hops is high because cache hits are ~free; budget-ms
+    # only bounds the cold-cache REST case; cache-ttl covers long, slow threads.
     chain:
-      max-hops: ${REPLY_CHAIN_MAX_HOPS:10}
-      budget-ms: ${REPLY_CHAIN_BUDGET_MS:400}
-      cache-ttl-minutes: ${REPLY_CHAIN_CACHE_TTL_MIN:30}
+      max-hops: ${REPLY_CHAIN_MAX_HOPS:50}
+      budget-ms: ${REPLY_CHAIN_BUDGET_MS:800}
+      cache-ttl-minutes: ${REPLY_CHAIN_CACHE_TTL_MIN:120}
       cache-max-size: ${REPLY_CHAIN_CACHE_MAX:2000}
   message:
     max-length: 2000
     can-mention-here-and-everyone: false
   context:
     history-fetch-size: 50
-  # Rolling per-(user, channel) context for the @-mention reply path (MentionContextService).
-  # Lets the bot remember its own follow-up questions ("por quanto tempo?") so the next
-  # mention from the same user completes the action instead of starting from zero.
-  mention-context:
-    max-messages: ${MENTION_CTX_MAX:10}
-    recency-minutes: ${MENTION_CTX_RECENCY_MIN:30}
-    retention-hours: ${MENTION_CTX_RETENTION_H:24}
   # When set, message listeners only respond in this channel — used to scope the bot
   # to a staging channel during local testing. Leave blank/unset to listen everywhere.
   test-channel-id: ${TEST_CHANNEL_ID:}

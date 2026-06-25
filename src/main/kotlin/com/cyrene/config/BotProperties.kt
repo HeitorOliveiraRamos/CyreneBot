@@ -29,7 +29,6 @@ data class BotProperties(
     val message: Message = Message(),
     val context: Context = Context(),
     val performance: Performance = Performance(),
-    val mentionContext: MentionContext = MentionContext(),
     /**
      * When set to a non-blank Discord channel ID, the message listeners
      * ([com.cyrene.discord.listener.MentionReplyListener] and
@@ -59,9 +58,9 @@ data class BotProperties(
      *  - [cacheMaxSize]: LRU size cap for that cache.
      */
     data class ReplyChain(
-        val maxHops: Int = 10,
-        val budgetMs: Long = 400,
-        val cacheTtlMinutes: Long = 30,
+        val maxHops: Int = 50,
+        val budgetMs: Long = 800,
+        val cacheTtlMinutes: Long = 120,
         val cacheMaxSize: Int = 2000,
     )
 
@@ -98,23 +97,5 @@ data class BotProperties(
         val brainTemperature: Double = 0.1,
         val brainTopP: Double = 0.5,
         val voiceTemperature: Double = 0.8,
-    )
-
-    /**
-     * Tuning for the rolling per-(user, channel) history used by the @-mention reply path
-     * ([com.cyrene.conversation.MentionContextService]).
-     *
-     *  - [maxMessages]: how many of the most recent mention messages to feed to the LLM as
-     *    context. Both user and assistant turns count; 10 ≈ 5 exchanges.
-     *  - [recencyMinutes]: a hard recency floor — messages older than this are excluded
-     *    from the context even if [maxMessages] would otherwise pull them in. Prevents
-     *    yesterday's unrelated thread from polluting today's prompt.
-     *  - [retentionHours]: rows older than this are deleted on the next write. Caps table
-     *    growth without needing a scheduled job.
-     */
-    data class MentionContext(
-        val maxMessages: Int = 10,
-        val recencyMinutes: Long = 30,
-        val retentionHours: Long = 24,
     )
 }

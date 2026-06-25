@@ -4,7 +4,6 @@ import com.cyrene.ai.OllamaAiService
 import com.cyrene.config.BotProperties
 import com.cyrene.conversation.ConversationMessage
 import com.cyrene.conversation.ConversationService
-import com.cyrene.conversation.MentionContextService
 import com.cyrene.conversation.MessageRole
 import com.cyrene.conversation.UsuarioService
 import com.cyrene.discord.ChainEntry
@@ -24,10 +23,12 @@ import java.util.concurrent.TimeUnit
  * Replies when the bot is @-mentioned in any channel. Skipped when the mentioning user
  * is already in an active `/iniciar-conversa` session (the chat listener handles those).
  *
- * Stateless prompting: each mention is answered without prior @-mention history. Instead,
- * the user block resolved by [UsuarioService] (effective name, live highest role and
- * permissions, plus whatever the user asked the bot to remember) is injected as a system
- * block. The exchange is still persisted afterwards for auditability.
+ * Context is scoped to the Discord reply chain: a fresh @-mention (no reply pointer)
+ * starts with a clean slate, while replying to one of Cyrene's messages walks that thread
+ * upward so the back-and-forth carries context. Two separate mention threads in the same
+ * channel never bleed into each other. The user block resolved by [UsuarioService]
+ * (effective name, live highest role and permissions, plus whatever the user asked the bot
+ * to remember) is injected as a system block.
  *
  * Moderation tool authority is NOT trusted from the cached flags — `DiscordTools.executeMod`
  * still re-verifies caller permissions live against JDA before acting.
@@ -37,7 +38,6 @@ class MentionReplyListener(
     private val ai: OllamaAiService,
     private val sender: DiscordMessageSender,
     private val conversations: ConversationService,
-    private val mentionContext: MentionContextService,
     private val usuarioService: UsuarioService,
     private val replyChainResolver: ReplyChainResolver,
     private val properties: BotProperties,
@@ -111,18 +111,6 @@ class MentionReplyListener(
                 executor,
             )
             .thenAccept { reply ->
-                try {
-                    mentionContext.recordExchange(
-                        userId = event.author.id,
-                        guildId = if (event.isFromGuild) event.guild.id else null,
-                        channelId = event.channel.id,
-                        userMessage = withoutMention,
-                        assistantReply = reply,
-                    )
-
-                } catch (e: Exception) {
-                    log.warn("Failed to persist mention exchange for user {}", event.author.id, e)
-                }
                 sender.replyLong(event.message, reply)
             }
             .exceptionally { ex ->

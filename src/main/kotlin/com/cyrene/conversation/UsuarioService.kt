@@ -60,7 +60,7 @@ class UsuarioService(
                 memoryBlock,
             ).joinToString("\n\n")
 
-            ResolvedUsuario(usuarioId, effectiveName, systemPrompt)
+            ResolvedUsuario(effectiveName, systemPrompt)
         } catch (e: Exception) {
             log.warn("resolveForEvent falhou para usuário={} canal={}", event.author.id, event.channel.id, e)
             null
@@ -156,7 +156,6 @@ class UsuarioService(
  * bloco de sistema montado.
  */
 data class ResolvedUsuario(
-    val usuarioId: String,
     val effectiveName: String,
     val systemPrompt: String,
 )

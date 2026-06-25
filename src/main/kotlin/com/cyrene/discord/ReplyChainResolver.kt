@@ -3,6 +3,7 @@ package com.cyrene.discord
 import com.cyrene.config.BotProperties
 import com.cyrene.conversation.MessageRole
 import com.cyrene.discord.util.BotReplyCache
+import com.cyrene.discord.util.CachedBotMessage
 import net.dv8tion.jda.api.entities.Message
 import net.dv8tion.jda.api.entities.channel.middleman.MessageChannel
 import org.slf4j.LoggerFactory
@@ -13,16 +14,19 @@ import java.util.concurrent.TimeUnit
  * Walks a Discord reply chain upward from a given message and returns the prior turns in
  * oldest-first order so they can be injected as conversation history.
  *
- * Three-tier lookup, designed to add as little latency as possible:
+ * Three-tier lookup per hop, fastest first:
  *  1. [Message.getReferencedMessage] from the gateway event (free — hop 1 ships inline
- *     with the MESSAGE_CREATE payload Discord already sent).
- *  2. [BotReplyCache] for Cyrene's own prior replies (in-process map, ~µs lookup).
- *  3. [MessageChannel.retrieveMessageById] REST fallback for human-authored hops we
- *     haven't cached. Blocks on `.complete()` — must only be called from the AI executor.
+ *     with the MESSAGE_CREATE payload Discord already sent; REST-fetched parents also
+ *     carry their own referenced message inline).
+ *  2. [BotReplyCache] — Cyrene's own replies AND the human messages she answered, so an
+ *     in-session thread resolves entirely from memory (~µs lookup, no REST).
+ *  3. [MessageChannel.retrieveMessageById] REST fallback for hops not in cache (e.g. after
+ *     a restart). Blocks on `.complete()` — must only be called from the AI executor.
  *
- * The walk is bounded by [BotProperties.ReplyChain.maxHops] AND
- * [BotProperties.ReplyChain.budgetMs] so a deep chain with all-uncached human turns can
- * never push the overall response latency past the configured budget.
+ * Because the cache covers both sides of a thread, the common case never touches REST, so
+ * the walk stays cheap even for long threads. It is still bounded by
+ * [BotProperties.ReplyChain.maxHops] AND [BotProperties.ReplyChain.budgetMs] so a deep
+ * chain that DOES fall through to REST (cold cache) can't blow the latency budget.
  *
  * The walker is intentionally *fail-soft*: any error fetching a parent (deleted message,
  * permissions, REST 404) stops the walk and returns whatever was collected so far. The
@@ -62,29 +66,38 @@ class ReplyChainResolver(
                 break
             }
 
-            // Tier 1 + 3: we have or can fetch a full JDA Message.
-            val resolved = preloaded ?: tryFetchMessage(start.channel, nextMessageId, nextChannelId)
-            if (resolved != null) {
-                collected += toChainEntry(resolved, selfUserId)
-                val parentRef = resolved.messageReference
+            // Tier 1: full JDA Message already in hand (inline referenced message).
+            val full = preloaded
+            if (full != null) {
+                collected += toChainEntry(full, selfUserId)
+                val parentRef = full.messageReference
                 nextMessageId = parentRef?.messageId
                 nextChannelId = parentRef?.channelId
-                preloaded = resolved.referencedMessage
+                preloaded = full.referencedMessage
                 hops++
                 continue
             }
 
-            // Tier 2: the bot cache — covers Cyrene's own turns without REST.
+            // Tier 2: in-memory cache — covers both Cyrene's turns and the human messages
+            // she answered, so an in-session thread resolves without any REST.
             val cached = botReplyCache.get(nextMessageId)
             if (cached != null) {
-                collected += ChainEntry(
-                    authorName = SELF_AUTHOR_LABEL,
-                    content = cached.content,
-                    role = MessageRole.ASSISTANT,
-                )
+                collected += cached.toChainEntry(selfUserId)
                 nextMessageId = cached.parentMessageId
                 nextChannelId = cached.parentChannelId
                 preloaded = null
+                hops++
+                continue
+            }
+
+            // Tier 3: REST fallback for hops not in cache (cold cache / restart).
+            val fetched = tryFetchMessage(start.channel, nextMessageId, nextChannelId)
+            if (fetched != null) {
+                collected += toChainEntry(fetched, selfUserId)
+                val parentRef = fetched.messageReference
+                nextMessageId = parentRef?.messageId
+                nextChannelId = parentRef?.channelId
+                preloaded = fetched.referencedMessage
                 hops++
                 continue
             }
@@ -117,6 +130,26 @@ class ReplyChainResolver(
                 role = MessageRole.USER,
             )
         }
+    }
+
+    /** Same mapping as [toChainEntry] but from a cached entry (no JDA [Message] needed). */
+    private fun CachedBotMessage.toChainEntry(selfUserId: String): ChainEntry = when {
+        authorId == selfUserId -> ChainEntry(
+            authorName = SELF_AUTHOR_LABEL,
+            content = content,
+            role = MessageRole.ASSISTANT,
+        )
+        isBot -> ChainEntry(
+            authorName = authorName,
+            content = content,
+            role = MessageRole.USER,
+            isOtherBot = true,
+        )
+        else -> ChainEntry(
+            authorName = authorName,
+            content = content,
+            role = MessageRole.USER,
+        )
     }
 
     private fun tryFetchMessage(
