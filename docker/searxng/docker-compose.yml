@@ -1,0 +1,22 @@
+# SearXNG para o fallback de busca web do CyreneBot (tool searchWeb).
+#
+# Subir:   cd docker/searxng && docker compose up -d
+# Logs:    docker compose logs -f searxng
+# Parar:   docker compose down
+#
+# Depois de subir, aponte o bot pra ele:  SEARXNG_URL=http://localhost:8080  (no .env)
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: cyrene-searxng
+    # Host 8888 → container 8080. A 8080 do host costuma estar ocupada pelo
+    # Payara/GlassFish do NetBeans, então usamos 8888 pra evitar conflito.
+    ports:
+      - "8888:8080"
+    volumes:
+      # Monta nossa config (com formato JSON habilitado) sobre a default da imagem.
+      - ./settings.yml:/etc/searxng/settings.yml:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+      - SEARXNG_SECRET=8c6ff3f34380179d414aecf09f88744151b98ff6ddb66a91486fabf6118db9f2
+    restart: unless-stopped

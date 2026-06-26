@@ -29,3 +29,5 @@ replay_pid*
 # Local secrets
 .env
 .env.local
+logs/
+.bot.pid

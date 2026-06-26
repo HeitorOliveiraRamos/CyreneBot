@@ -73,6 +73,21 @@
             <artifactId>spring-ai-starter-model-ollama</artifactId>
         </dependency>
 
+        <!-- Vector store for the HSR knowledge base (RAG). Version is managed by the
+             spring-ai-bom above so it stays in lockstep with the Ollama starter — do NOT
+             pin it explicitly (mixing 1.0.0 with 2.0.0/2.0.0-M8 breaks the Document/VectorStore APIs). -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-vector-store-pgvector</artifactId>
+        </dependency>
+
+        <!-- CSV/JSON parsing for Kaggle dataset ingestion (HsrKnowledgeIngestion).
+             jackson-databind is already on the classpath via jackson-module-kotlin. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.dataformat</groupId>
+            <artifactId>jackson-dataformat-csv</artifactId>
+        </dependency>
+
         <!-- Database -->
         <dependency>
             <groupId>org.postgresql</groupId>

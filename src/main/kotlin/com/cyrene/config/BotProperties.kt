@@ -29,6 +29,7 @@ data class BotProperties(
     val message: Message = Message(),
     val context: Context = Context(),
     val performance: Performance = Performance(),
+    val knowledge: Knowledge = Knowledge(),
     /**
      * When set to a non-blank Discord channel ID, the message listeners
      * ([com.cyrene.discord.listener.MentionReplyListener] and
@@ -97,5 +98,29 @@ data class BotProperties(
         val brainTemperature: Double = 0.1,
         val brainTopP: Double = 0.5,
         val voiceTemperature: Double = 0.8,
+    )
+
+    /**
+     * Honkai: Star Rail RAG knowledge base. Backs the `lookupHsr` (local vector search)
+     * and `searchWeb` (online fallback) tools in
+     * [com.cyrene.discord.tools.GameKnowledgeTools], plus the one-shot ingestion runner
+     * [com.cyrene.knowledge.HsrKnowledgeIngestion].
+     *
+     *  - [dataDir]: folder of Kaggle CSV/JSON files to ingest.
+     *  - [reindex]: when true, the ingestion runner wipes and rebuilds the vector store on
+     *    startup. A run-once switch — keep false in normal operation.
+     *  - [batchSize]: documents embedded+inserted per batch during ingestion.
+     *  - [topK]: chunks returned to the brain per `lookupHsr` query.
+     *  - [similarityThreshold]: minimum cosine similarity for a chunk to count as a hit;
+     *    below it, `lookupHsr` reports nothing so the brain can fall back to `searchWeb`.
+     *  - [searxngUrl]: optional self-hosted SearXNG JSON endpoint; blank disables web search.
+     */
+    data class Knowledge(
+        val dataDir: String = "./data/hsr",
+        val reindex: Boolean = false,
+        val batchSize: Int = 64,
+        val topK: Int = 5,
+        val similarityThreshold: Double = 0.55,
+        val searxngUrl: String? = null,
     )
 }

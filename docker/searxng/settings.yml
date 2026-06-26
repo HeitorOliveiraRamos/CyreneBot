@@ -1,0 +1,32 @@
+# SearXNG configuration for CyreneBot's web-search fallback (searchWeb tool).
+#
+# The ONLY non-default things that matter for the bot:
+#   - search.formats inclui "json"  → sem isso o WebSearchClient recebe HTML e falha.
+#   - server.secret_key             → obrigatório; troque por um valor seu em produção.
+#   - server.limiter: false         → desliga o rate-limiter/bot-detection para o uso
+#                                     local da API (senão chamadas via código tomam 429).
+#
+# Doc: https://docs.searxng.org/admin/settings/index.html
+use_default_settings: true
+
+general:
+  instance_name: "Cyrene SearXNG"
+  debug: false
+
+server:
+  # Trocado em runtime pela env SEARXNG_SECRET no docker-compose; este é um fallback.
+  secret_key: "8c6ff3f34380179d414aecf09f88744151b98ff6ddb66a91486fabf6118db9f2"
+  limiter: false
+  image_proxy: false
+
+search:
+  # 'json' é o que habilita a API que o bot consome.
+  formats:
+    - html
+    - json
+  # Idiomas/safesearch padrão; o bot já prefixa "Honkai Star Rail" na query.
+  safe_search: 0
+  autocomplete: ""
+
+ui:
+  static_use_hash: true

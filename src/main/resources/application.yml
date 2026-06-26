@@ -29,6 +29,20 @@ spring:
           # Plain `llama3` does NOT support tools and will cause tool-aware chats to
           # fall back to text-only behavior.
           model: ${MODEL_NAME:llama3.1}
+      # Embedding model for the RAG knowledge base. Pull it once: `ollama pull nomic-embed-text`.
+      # nomic-embed-text outputs 768-dim vectors — this MUST match pgvector.dimensions below.
+      # If you swap to a different embed model (e.g. mxbai-embed-large = 1024), update both.
+      embedding:
+        options:
+          model: ${EMBED_MODEL_NAME:nomic-embed-text}
+    vectorstore:
+      pgvector:
+        # Spring AI creates the `vector_store` table + HNSW index on first start.
+        # The `vector` extension itself is created by Flyway (V10__pgvector.sql) beforehand.
+        initialize-schema: true
+        dimensions: ${PGVECTOR_DIMS:768}
+        index-type: HNSW
+        distance-type: COSINE_DISTANCE
 
 bot:
   token: ${BOT_TOKEN}
@@ -78,6 +92,28 @@ bot:
   # When set, message listeners only respond in this channel — used to scope the bot
   # to a staging channel during local testing. Leave blank/unset to listen everywhere.
   test-channel-id: ${TEST_CHANNEL_ID:}
+
+  # Honkai: Star Rail knowledge base (RAG). Feeds the lookupHsr / searchWeb tools.
+  knowledge:
+    # Directory holding the Kaggle CSV/JSON files to ingest. Each .csv/.json file becomes
+    # a set of Documents (one per row/object). Relative to the working directory.
+    data-dir: ${HSR_DATA_DIR:./data/hsr}
+    # When true, the ingestion runner wipes `vector_store` and re-embeds everything on
+    # startup, then the bot continues normally. Leave false in production — flip it on for
+    # a single run after dropping new datasets in data-dir:
+    #   HSR_REINDEX=true java -jar cyrene-bot.jar    (or mvn spring-boot:run)
+    reindex: ${HSR_REINDEX:false}
+    # How many documents to embed+insert per batch during ingestion. Lower if Ollama
+    # times out on big batches; raise to go faster.
+    batch-size: ${HSR_INGEST_BATCH:64}
+    # How many knowledge chunks lookupHsr returns to the brain pass per query.
+    top-k: ${HSR_TOP_K:5}
+    # Minimum cosine similarity (0..1) for a chunk to be considered relevant. Below this,
+    # lookupHsr reports "nothing found" so the brain can fall back to searchWeb.
+    similarity-threshold: ${HSR_SIM_THRESHOLD:0.55}
+    # Optional self-hosted SearXNG JSON endpoint for the web-search fallback, e.g.
+    # http://localhost:8080 . Leave blank to disable web search (lookupHsr still works).
+    searxng-url: ${SEARXNG_URL:}
 
 logging:
   level:
