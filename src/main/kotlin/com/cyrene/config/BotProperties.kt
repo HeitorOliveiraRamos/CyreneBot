@@ -98,6 +98,16 @@ data class BotProperties(
         val brainTemperature: Double = 0.1,
         val brainTopP: Double = 0.5,
         val voiceTemperature: Double = 0.8,
+        /**
+         * Token budget for the knowledge path — both the brain's HSR extraction and the
+         * voice's persona rewrite of it. Much larger than [numPredict] because a full
+         * character kit (every ability + multipliers + traces + Eidolons), and the
+         * persona retelling of it, easily blow past the 512-token chat default that is
+         * fine for a one-line moderation confirmation. Applied to the brain pass always
+         * (it's only a ceiling — moderation replies still stop after a sentence) and to
+         * the knowledge voice pass.
+         */
+        val knowledgeNumPredict: Int = 2048,
     )
 
     /**
@@ -122,5 +132,26 @@ data class BotProperties(
         val topK: Int = 5,
         val similarityThreshold: Double = 0.55,
         val searxngUrl: String? = null,
+        /**
+         * How many of the top web-search results to open and read in full (download the
+         * page, strip it to readable text) instead of trusting only the 1–2 sentence
+         * SearXNG snippet. Full page text is what lets the brain reconstruct a complete
+         * leaked/older kit that no snippet ever contains. 0 disables fetching (snippets
+         * only). Kept low (2): wiki pages like game8 are huge and the budget is better
+         * spent reading FEW pages DEEPLY (see [webFetchCharLimit]) than many shallowly —
+         * snippets are still returned for ALL results, so source breadth isn't lost.
+         */
+        val webFetchPages: Int = 2,
+        /**
+         * Per-page cap (characters) on the extracted text fed into the prompt, so one
+         * sprawling wiki page can't swallow the context window. Deliberately large: on
+         * pages like game8 the leading ~8k chars are table-of-contents / ratings / nav
+         * noise and the real ability multipliers and traces don't appear until ~14–16k in,
+         * so a small cap would clip exactly the kit numbers. With num-ctx 16384 the
+         * 2×18000 worst case (~9k tokens of web text) still leaves room for the brain
+         * prompt, the local-KB hit, and the [Performance.knowledgeNumPredict] reply budget.
+         * Lower this (and/or [webFetchPages]) if you run a smaller num-ctx.
+         */
+        val webFetchCharLimit: Int = 18000,
     )
 }

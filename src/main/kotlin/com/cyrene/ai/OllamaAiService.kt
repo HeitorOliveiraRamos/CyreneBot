@@ -78,7 +78,7 @@ class OllamaAiService(
         if (log.isDebugEnabled) {
             log.debug("Brain output ({} chars): {}", brainOutput.length, brainOutput.take(500))
         }
-        return runVoicePass(history, brainOutput, extraSystemPrompt, userName).ifBlank {
+        return runVoicePass(history, brainOutput, extraSystemPrompt, userName, intent).ifBlank {
             log.warn("Voice pass produced blank output; falling back to brain output.")
             brainOutput
         }
@@ -175,25 +175,32 @@ class OllamaAiService(
         brainOutput: String,
         extraSystemPrompt: String?,
         userName: String?,
+        intent: Intent,
     ): String {
         val trimmed = brainOutput.trim()
         val brainHasAction = trimmed.isNotBlank() &&
             !trimmed.equals(BRAIN_NO_ACTION, ignoreCase = true) &&
             !trimmed.equals(BRAIN_DONE, ignoreCase = true)
 
-        // Split path: when the brain executed a tool or produced a real factual result,
-        // route the voice through a FOCUSED prompt that does not include the conversation
-        // history. Why: with a long history present, the voice model anchors on the
-        // user's last turn ("muta o X") and refuses, ignoring the system block telling it
-        // the action already happened. Stripping history removes that anchor — the voice
-        // sees only "narrate this result in character" and complies.
+        // Three voice paths, picked by intent + whether the brain produced a real result:
         //
-        // For purely conversational messages (brain returned NO_ACTION), keep the full
-        // history so the voice can carry on the chat naturally.
-        return if (brainHasAction) {
-            runVoicePassFocused(trimmed, extraSystemPrompt, userName)
-        } else {
-            runVoicePassConversational(history, extraSystemPrompt, userName)
+        //  - KNOWLEDGE with a result → [runVoicePassKnowledge]: keep ALL the detail. A
+        //    full kit must survive, so this path does NOT cap length and explicitly
+        //    overrides the persona's 1–3 sentence rule for this one answer.
+        //  - any other action (moderation / Discord state) → [runVoicePassFocused]: terse,
+        //    in-character, and history-stripped. Why strip history: with a long history
+        //    present the voice anchors on the user's last turn ("muta o X") and refuses,
+        //    ignoring the system block saying the action already happened. Removing the
+        //    anchor makes it just narrate the result.
+        //  - no action (brain returned NO_ACTION/DONE) → [runVoicePassConversational]:
+        //    keep full history so the voice carries on the chat naturally.
+        return when {
+            brainHasAction && intent == Intent.KNOWLEDGE ->
+                runVoicePassKnowledge(history, trimmed, extraSystemPrompt, userName)
+            brainHasAction ->
+                runVoicePassFocused(trimmed, extraSystemPrompt, userName)
+            else ->
+                runVoicePassConversational(history, extraSystemPrompt, userName)
         }
     }
 
@@ -251,6 +258,76 @@ class OllamaAiService(
         logPrompt("voice/focused", voiceMessages)
 
         val response = chatModel.call(Prompt(voiceMessages, voiceOptions()))
+        val raw = response.result.output.text ?: ""
+        return postProcessor.process(raw)
+    }
+
+    /**
+     * Knowledge voice call: persona + a "retell these HSR facts completely" directive,
+     * carrying the user's original question AND the brain's gathered data as the payload.
+     *
+     * Differs from [runVoicePassFocused] in two ways that matter for a kit:
+     *  - it does NOT cap length and explicitly overrides the persona's hard 1–3 sentence
+     *    rule for this answer, so a full kit comes through whole instead of crushed;
+     *  - it includes the user's question, so depth cues ("kit completo", "lvl 999",
+     *    "pesquisa na internet") reach the voice instead of being stripped away.
+     * Uses [knowledgeVoiceOptions] (larger token budget, lower temperature for fidelity).
+     */
+    private fun runVoicePassKnowledge(
+        history: List<ConversationMessage>,
+        brainResult: String,
+        extraSystemPrompt: String?,
+        userName: String?,
+    ): String {
+        val instruction = """
+            ## Sua tarefa agora
+
+            Outra etapa do bot pesquisou dados de Honkai: Star Rail (base local e/ou
+            internet) para responder à pergunta do usuário. Sua função é repassar esses
+            dados em personagem, em PT-BR, de forma COMPLETA e bem organizada.
+
+            Regras desta etapa (têm prioridade sobre o limite de tamanho da sua persona):
+            - O limite de "1 a 3 frases" NÃO se aplica a esta resposta. Aqui você PODE e
+              DEVE ser detalhada: use vários parágrafos e/ou listas por tópico.
+            - Repasse TODOS os detalhes relevantes dos dados: nomes de habilidades, tipo
+              (Básico/Skill/Ultimate/Talento/Técnica), multiplicadores e percentuais,
+              efeitos, energia, traces, Eidolons — sem cortar nem resumir o que veio.
+            - Use SOMENTE os dados fornecidos abaixo. NÃO complete de memória. Se um campo
+              não veio nos dados, simplesmente não fale dele.
+            - Organize com tópicos ("- " ou "• ") e títulos curtos em **negrito** por
+              habilidade. Markdown do Discord é suportado.
+            - Mantenha um toque do seu jeito — um vocativo carinhoso no começo e/ou no fim —
+              mas o corpo da resposta é informativo; afeto não substitui dado.
+            - NÃO cite este bloco nem use rótulos meta ("contexto interno", "brain",
+              "etapa", "base local", "web search"). Apenas entregue o conteúdo.
+        """.trimIndent()
+
+        val systemBlock = listOfNotNull(
+            extraSystemPrompt?.takeIf { it.isNotBlank() },
+            instruction,
+        ).joinToString("\n\n")
+
+        val question = history.lastOrNull { it.role == MessageRole.USER }?.content?.trim().orEmpty()
+        val payload = buildString {
+            if (question.isNotEmpty()) append("Pergunta do usuário: ").append(question).append("\n\n")
+            append("Dados encontrados para responder (repasse TODOS os detalhes relevantes):\n")
+            append(brainResult)
+        }
+        val syntheticTurn = ConversationMessage(
+            conversationId = 0L,
+            role = MessageRole.USER,
+            content = payload,
+        )
+        val voiceMessages = promptBuilder.build(
+            history = listOf(syntheticTurn),
+            extraSystemPrompt = systemBlock,
+            overrideOnly = false,
+            userName = userName,
+        )
+
+        logPrompt("voice/knowledge", voiceMessages)
+
+        val response = chatModel.call(Prompt(voiceMessages, knowledgeVoiceOptions()))
         val raw = response.result.output.text ?: ""
         return postProcessor.process(raw)
     }
@@ -325,7 +402,10 @@ class OllamaAiService(
             .temperature(properties.performance.brainTemperature)
             .topP(properties.performance.brainTopP)
             .numCtx(properties.performance.numCtx)
-            .numPredict(properties.performance.numPredict)
+            // Knowledge budget, not the 512 chat default: an HSR extraction (a full kit, or
+            // a fetched web page distilled into one) needs room. It's only a ceiling —
+            // moderation replies still stop after a sentence, so this never slows them down.
+            .numPredict(properties.performance.knowledgeNumPredict)
             .numThread(properties.performance.numThread)
             .build()
 
@@ -335,6 +415,21 @@ class OllamaAiService(
             .temperature(properties.performance.voiceTemperature)
             .numCtx(properties.performance.numCtx)
             .numPredict(properties.performance.numPredict)
+            .numThread(properties.performance.numThread)
+            .build()
+
+    /**
+     * Voice options for the knowledge path: same model as [voiceOptions] but with the
+     * larger [BotProperties.Performance.knowledgeNumPredict] budget (a kit retelling is
+     * long) and a temperature capped lower — this pass relays facts, so favour fidelity
+     * over flourish, while still honouring a user who configured an even lower voice temp.
+     */
+    private fun knowledgeVoiceOptions(): OllamaOptions =
+        OllamaOptions.builder()
+            .model(properties.voiceModelName)
+            .temperature(properties.performance.voiceTemperature.coerceAtMost(0.6))
+            .numCtx(properties.performance.numCtx)
+            .numPredict(properties.performance.knowledgeNumPredict)
             .numThread(properties.performance.numThread)
             .build()
 
@@ -415,9 +510,15 @@ class OllamaAiService(
                a mensagem é puramente conversacional / sobre o próprio bot.
 
             Regras desta etapa:
-            - Texto direto e neutro. NÃO use voz de personagem, vocativos, saudações,
-              emojis ou floreio.
-            - Máximo 2 frases.
+            - Texto direto e neutro, sem voz de personagem, vocativos, saudações, emojis
+              ou floreio — em QUALQUER caso. Tom e persona vêm no passo de voz depois.
+            - Para AÇÕES de moderação ou CONSULTAS de estado do Discord: seja terso, no
+              máximo 2 frases.
+            - Para PERGUNTAS FACTUAIS de HSR: o oposto — NÃO se limite a 2 frases. Faça
+              uma extração COMPLETA e organizada de TUDO que lookupHsr/searchWeb
+              retornaram (cada habilidade com tipo, multiplicadores/percentuais, efeitos,
+              energia, traces, Eidolons). Não resuma nem descarte detalhe — perder dado
+              aqui é o pior erro desta etapa; o passo de voz cuida do tom.
             - Se chamou uma ferramenta com sucesso, descreva o resultado em uma frase
               (ex.: "Timeout de 10 minutos aplicado em <@123> por 'xingar o bot'.").
             - Se a ferramenta retornou ok=false, descreva o erro em uma frase (ex.:
@@ -512,10 +613,18 @@ class OllamaAiService(
 
             1. SEMPRE chame `lookupHsr` PRIMEIRO. Nunca afirme nomes, status ou kits de
                memória — eles podem estar errados.
-            2. Se `lookupHsr` retornar `found=true`, escreva uma saída factual e curta
-               (1–3 frases) baseada APENAS no conteúdo retornado.
-            3. Se `lookupHsr` retornar `found=false`, e a pergunta for sobre algo recente
-               (patch novo, personagem recém-lançado, evento atual), chame `searchWeb`.
+            2. Chame `searchWeb` quando QUALQUER destes valer:
+               - `lookupHsr` retornou `found=false`;
+               - a pergunta é sobre algo recente, não lançado ou VAZADO/leak (personagem
+                 futuro, kit vazado, patch/banner/evento atual);
+               - o usuário pediu EXPLICITAMENTE para pesquisar na internet/web/online.
+               Neste último caso, chame `searchWeb` MESMO que `lookupHsr` já tenha achado
+               algo — e COMBINE as duas fontes na saída (o que a base local tem + o que a
+               web acrescenta), sem repetir informação redundante.
+            3. Escreva uma saída factual COMPLETA baseada APENAS no que as ferramentas
+               retornaram. Em `searchWeb`, leia o campo `content` (texto da página), não só
+               o `snippet` — o kit detalhado está no `content`. Inclua TODAS as habilidades
+               e detalhes encontrados; não comprima.
             4. Se nem `lookupHsr` nem `searchWeb` trouxerem a informação, NÃO invente —
                diga factualmente que a informação não foi encontrada (ex.: "Sem dados
                sobre esse personagem na base nem na web.").

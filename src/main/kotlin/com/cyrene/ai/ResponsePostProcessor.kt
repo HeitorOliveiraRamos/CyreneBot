@@ -1,18 +1,18 @@
 package com.cyrene.ai
 
-import com.cyrene.config.BotProperties
 import org.springframework.stereotype.Component
 
 @Component
-class ResponsePostProcessor(private val properties: BotProperties) {
+class ResponsePostProcessor {
 
     private val thinkBlock = Regex("<think>[\\s\\S]*?</think>")
 
-    fun process(raw: String): String {
-        var content = raw
-        if (properties.modelName.contains("deepseek", ignoreCase = true)) {
-            content = thinkBlock.replace(content, "").trim()
-        }
-        return content
-    }
+    /**
+     * Strips chain-of-thought `<think>…</think>` blocks unconditionally. Reasoning models
+     * emit them — deepseek, and Qwen3 with thinking mode on — and they must never reach
+     * Discord. Stripping is safe for models that don't emit the tag (the regex just doesn't
+     * match), so we no longer gate it on the model name (previously deepseek-only).
+     */
+    fun process(raw: String): String =
+        thinkBlock.replace(raw, "").trim()
 }

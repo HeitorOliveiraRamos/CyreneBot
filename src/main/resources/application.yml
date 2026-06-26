@@ -64,6 +64,10 @@ bot:
     num-ctx: ${OLLAMA_NUM_CTX:4096}
     num-predict: ${OLLAMA_NUM_PREDICT:512}
     num-thread: ${OLLAMA_NUM_THREAD:8}
+    # Token budget for the knowledge path (HSR brain extraction + persona retelling).
+    # A full kit + its persona rewrite blows past num-predict (512), which is sized for
+    # one-line moderation confirmations. Only a ceiling — short replies still stop early.
+    knowledge-num-predict: ${OLLAMA_KNOWLEDGE_NUM_PREDICT:2048}
     # Brain pass + intent gate are classification-like: keep sampling tight so the model
     # doesn't hallucinate tool calls on a greeting.
     brain-temperature: ${OLLAMA_BRAIN_TEMP:0.1}
@@ -114,6 +118,15 @@ bot:
     # Optional self-hosted SearXNG JSON endpoint for the web-search fallback, e.g.
     # http://localhost:8080 . Leave blank to disable web search (lookupHsr still works).
     searxng-url: ${SEARXNG_URL:}
+    # How many of the top web results to open and read in full (page text), not just the
+    # short SearXNG snippet — this is what makes leaked/older kits actually answerable.
+    # 0 = snippets only. Kept low (2): better to read few pages deeply than many shallowly
+    # (wiki pages bury the kit ~14k chars in); snippets still return for ALL results.
+    web-fetch-pages: ${HSR_WEB_FETCH_PAGES:2}
+    # Per-page character cap on extracted text fed to the model (bounds the context window).
+    # Large on purpose — on game8-style pages the ability multipliers don't appear until
+    # ~14–16k chars in, after the table-of-contents/ratings preamble. Lower if num-ctx is small.
+    web-fetch-char-limit: ${HSR_WEB_FETCH_CHARS:18000}
 
 logging:
   level:

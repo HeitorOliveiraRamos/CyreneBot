@@ -83,10 +83,13 @@ class GameKnowledgeTools(
     }
 
     @Tool(
-        description = "Pesquisa Honkai: Star Rail NA INTERNET. Use APENAS quando lookupHsr não " +
-            "encontrar a informação na base local — tipicamente para conteúdo NOVO ou recente: " +
-            "personagens recém-lançados, patch/versão atual, banners, eventos ao vivo, tier lists " +
-            "atualizadas. NÃO use para fatos estáticos que a base local cobre.",
+        description = "Pesquisa Honkai: Star Rail NA INTERNET e LÊ o conteúdo das páginas (não só " +
+            "títulos). Use quando: (a) lookupHsr não encontrou na base local; (b) a pergunta é sobre " +
+            "conteúdo NOVO/recente ou ainda não lançado — personagens recém-lançados ou VAZADOS/leaks, " +
+            "kits futuros, patch/versão atual, banners, eventos; ou (c) o usuário pediu EXPLICITAMENTE " +
+            "para pesquisar na internet/web/online (nesse caso chame mesmo que lookupHsr tenha achado " +
+            "algo, e combine as duas fontes). Cada resultado traz 'content' com o texto da página — use-o, " +
+            "não só o 'snippet'.",
     )
     fun searchWeb(
         @ToolParam(description = "O que buscar na internet, em linguagem natural. Ex.: 'banner atual versão 3.3', 'novo personagem 5 estrelas'.")
@@ -108,7 +111,17 @@ class GameKnowledgeTools(
         return mapOf(
             "found" to true,
             "source" to "web_search",
-            "results" to results.map { mapOf("title" to it.title, "url" to it.url, "snippet" to it.snippet) },
+            // `content` is the full page text for the top results (empty for the rest, or when
+            // the fetch failed). Prefer `content` over `snippet` when present — the snippet is
+            // only a teaser; the kit details live in `content`.
+            "results" to results.map {
+                mapOf(
+                    "title" to it.title,
+                    "url" to it.url,
+                    "snippet" to it.snippet,
+                    "content" to it.content,
+                )
+            },
         )
     }
 }
