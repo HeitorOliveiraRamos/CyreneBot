@@ -1,5 +1,6 @@
 package com.cyrene.discord.listener
 
+import com.cyrene.ai.InferenceGate
 import com.cyrene.ai.OllamaAiService
 import com.cyrene.config.BotProperties
 import com.cyrene.conversation.ConversationMessage
@@ -9,6 +10,7 @@ import com.cyrene.conversation.UsuarioService
 import com.cyrene.discord.ChainEntry
 import com.cyrene.discord.ReplyChainResolver
 import com.cyrene.discord.tools.DiscordToolContext
+import com.cyrene.discord.util.BotMessages
 import com.cyrene.discord.util.DiscordMessageSender
 import net.dv8tion.jda.api.entities.Message
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent
@@ -43,6 +45,7 @@ class MentionReplyListener(
     private val replyChainResolver: ReplyChainResolver,
     private val properties: BotProperties,
     private val executor: Executor,
+    private val inferenceGate: InferenceGate,
 ) : ListenerAdapter() {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -82,12 +85,19 @@ class MentionReplyListener(
         val secondsSince = TimeUnit.MILLISECONDS.toSeconds(now - (cooldowns[userId] ?: 0L))
         if (secondsSince < cooldownSeconds) {
             val wait = cooldownSeconds - secondsSince
-            event.message.reply(
-                "Você precisa esperar $wait segundos antes de fazer outra pergunta."
-            ).queue()
+            event.message.reply(BotMessages.cooldown(wait)).queue()
             return
         }
         registerCooldown(userId, now, cooldownSeconds)
+
+        // Bound concurrent LLM pipelines: a single Ollama serializes generations, so a burst
+        // of mentions would otherwise pile up and slow every reply. When the gate is full,
+        // answer immediately in character instead of joining the queue. The cooldown above
+        // already paces a single user's retries, so this can't be spammed.
+        if (!inferenceGate.tryAcquire()) {
+            event.message.reply(BotMessages.busy(event.author.effectiveName)).queue()
+            return
+        }
 
         val toolContext = DiscordToolContext(
             callerUserId = event.author.id,
@@ -95,39 +105,51 @@ class MentionReplyListener(
             channelId = event.channel.id,
         )
 
-        CompletableFuture
-            .supplyAsync(
-                {
-                    // Resolve / upsert the user row on the AI executor so the JDA lookups
-                    // don't block the gateway thread.
-                    val resolved = usuarioService.resolveForEvent(event)
+        try {
+            CompletableFuture
+                .supplyAsync(
+                    {
+                        // Resolve / upsert the user row on the AI executor so the JDA lookups
+                        // don't block the gateway thread.
+                        val resolved = usuarioService.resolveForEvent(event)
 
-                    // Reconstruct the Discord reply chain (oldest → newest). Bounded by
-                    // maxHops + budget so worst-case latency stays predictable; safe to
-                    // call here because we're already off the gateway thread.
-                    val chain = replyChainResolver.resolveChain(event.message, selfUser.id)
-                    val currentName = resolved?.effectiveName ?: event.author.effectiveName
-                    val history = buildHistory(chain, referenced, currentName, withoutMention, selfUser.id)
+                        // Reconstruct the Discord reply chain (oldest → newest). Bounded by
+                        // maxHops + budget so worst-case latency stays predictable; safe to
+                        // call here because we're already off the gateway thread.
+                        val chain = replyChainResolver.resolveChain(event.message, selfUser.id)
+                        val currentName = resolved?.effectiveName ?: event.author.effectiveName
+                        val history = buildHistory(chain, referenced, currentName, withoutMention, selfUser.id)
 
-                    ai.chatBrainAndVoice(
-                        history = history,
-                        toolContext = toolContext,
-                        extraSystemPrompt = resolved?.systemPrompt,
-                        userName = resolved?.effectiveName,
-                    )
-                },
-                executor,
-            )
-            .thenAccept { reply ->
-                sender.replyLong(event.message, reply)
-            }
-            .exceptionally { ex ->
-                log.error("MentionReplyListener failed", ex)
-                event.message.reply(
-                    "Desculpe, ocorreu um erro inesperado ao processar sua solicitação."
-                ).queue()
-                null
-            }
+                        ai.chatBrainAndVoice(
+                            history = history,
+                            toolContext = toolContext,
+                            extraSystemPrompt = resolved?.systemPrompt,
+                            userName = resolved?.effectiveName,
+                        )
+                    },
+                    executor,
+                )
+                // Single completion handler so the gate permit is released exactly once,
+                // whether the pipeline succeeded or threw.
+                .whenComplete { reply, ex ->
+                    try {
+                        if (ex != null) {
+                            log.error("MentionReplyListener failed", ex)
+                            event.message.reply(BotMessages.ERROR).queue()
+                        } else {
+                            sender.replyLong(event.message, reply)
+                        }
+                    } finally {
+                        inferenceGate.release()
+                    }
+                }
+        } catch (e: Exception) {
+            // supplyAsync can reject synchronously if the executor is saturated; release the
+            // permit we just took so it isn't leaked.
+            inferenceGate.release()
+            log.error("MentionReplyListener could not submit work", e)
+            event.message.reply(BotMessages.ERROR).queue()
+        }
     }
 
     /**

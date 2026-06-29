@@ -1,8 +1,16 @@
 package com.cyrene.knowledge
 
 import com.cyrene.config.BotProperties
+import com.cyrene.ai.AiMetrics
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Element
+import org.jsoup.nodes.Node
+import org.jsoup.nodes.TextNode
+import org.jsoup.parser.Parser
+import org.jsoup.select.NodeTraversor
+import org.jsoup.select.NodeVisitor
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import java.net.URI
@@ -12,6 +20,8 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.charset.StandardCharsets
 import java.time.Duration
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
 
 /**
  * One web search result, flattened to what the LLM actually needs.
@@ -46,6 +56,7 @@ data class WebSearchResult(
 class WebSearchClient(
     private val properties: BotProperties,
     private val mapper: ObjectMapper,
+    private val metrics: AiMetrics,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -105,23 +116,44 @@ class WebSearchClient(
     /**
      * Opens the top [BotProperties.Knowledge.webFetchPages] results and fills in
      * [WebSearchResult.content] with their readable page text. This is the difference
-     * between the model seeing a one-line snippet and seeing the actual kit table. Fetches
-     * are best-effort and sequential (a handful of pages, modest payoff from parallelism vs.
-     * the added complexity); any page that times out or isn't HTML is simply left snippet-only.
+     * between the model seeing a one-line snippet and seeing the actual kit table.
+     *
+     * The fetches run CONCURRENTLY (via [HttpClient.sendAsync]), so total latency is roughly
+     * one page fetch instead of the sum — with the default 2 pages at an 8s request timeout
+     * each, worst case drops from ~16s to ~8s. Each future is still bounded by its own request
+     * timeout, and we add a small overall [FETCH_AWAIT_SECONDS] join guard so a single hung
+     * connection can't stall the whole knowledge turn. Any page that times out, errors, or
+     * isn't HTML is simply left snippet-only.
      */
     private fun enrichWithPageText(results: List<WebSearchResult>): List<WebSearchResult> {
         val pages = properties.knowledge.webFetchPages
         if (pages <= 0 || results.isEmpty()) return results
         val charLimit = properties.knowledge.webFetchCharLimit
-        return results.mapIndexed { i, r ->
-            if (i >= pages) return@mapIndexed r
-            val text = fetchReadableText(r.url, charLimit)
-            if (text.isNotBlank()) r.copy(content = text) else r
+
+        return metrics.timePass("web_fetch") {
+            // Kick off all fetches up front so they overlap, then collect their results in order.
+            val inFlight = results.take(pages).map { fetchReadableTextAsync(it.url, charLimit) }
+
+            results.mapIndexed { i, r ->
+                if (i >= pages) return@mapIndexed r
+                val text = try {
+                    inFlight[i].get(FETCH_AWAIT_SECONDS, TimeUnit.SECONDS)
+                } catch (e: Exception) {
+                    log.debug("Page fetch join failed for {}: {}", r.url, e.message)
+                    ""
+                }
+                if (text.isNotBlank()) r.copy(content = text) else r
+            }
         }
     }
 
-    /** Downloads [url] and returns its readable text (tags stripped), capped at [charLimit]. */
-    private fun fetchReadableText(url: String, charLimit: Int): String {
+    /**
+     * Asynchronously downloads [url] and reduces it to readable text (tags stripped), capped
+     * at [charLimit]. Returns a never-failing future: any error completes it with "" so the
+     * caller treats the page as snippet-only. A malformed URL can throw synchronously while
+     * building the request, hence the outer try.
+     */
+    private fun fetchReadableTextAsync(url: String, charLimit: Int): CompletableFuture<String> {
         return try {
             val request = HttpRequest.newBuilder(URI.create(url))
                 .timeout(Duration.ofSeconds(8))
@@ -130,68 +162,88 @@ class WebSearchClient(
                 .header("Accept", "text/html,application/xhtml+xml")
                 .GET()
                 .build()
-            val response = http.send(request, HttpResponse.BodyHandlers.ofString())
-            if (response.statusCode() !in 200..299) {
-                log.debug("Page fetch HTTP {} for {}", response.statusCode(), url)
-                return ""
-            }
-            val contentType = response.headers().firstValue("content-type").orElse("")
-            if (contentType.isNotEmpty() && !contentType.contains("html", ignoreCase = true)) return ""
-            val body = response.body().let { if (it.length > MAX_HTML_CHARS) it.substring(0, MAX_HTML_CHARS) else it }
-            htmlToText(body).take(charLimit)
+            http.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                .thenApply { response -> extractReadableText(response, url, charLimit) }
+                .exceptionally { e ->
+                    log.debug("Page fetch failed for {}: {}", url, e.message)
+                    ""
+                }
         } catch (e: Exception) {
-            log.debug("Page fetch failed for {}: {}", url, e.message)
-            ""
+            log.debug("Page fetch setup failed for {}: {}", url, e.message)
+            CompletableFuture.completedFuture("")
         }
+    }
+
+    /** Validates an [HttpResponse] is OK + HTML, then reduces its body to capped readable text. */
+    private fun extractReadableText(response: HttpResponse<String>, url: String, charLimit: Int): String {
+        if (response.statusCode() !in 200..299) {
+            log.debug("Page fetch HTTP {} for {}", response.statusCode(), url)
+            return ""
+        }
+        val contentType = response.headers().firstValue("content-type").orElse("")
+        if (contentType.isNotEmpty() && !contentType.contains("html", ignoreCase = true)) return ""
+        val body = response.body().let { if (it.length > MAX_HTML_CHARS) it.substring(0, MAX_HTML_CHARS) else it }
+        return htmlToText(body).take(charLimit)
     }
 
     internal companion object {
         /** Hard cap on raw HTML processed, so a pathological page can't make the regexes crawl. */
         const val MAX_HTML_CHARS = 500_000
 
-        // (?is) = dot-matches-newline + case-insensitive. Backreference \1 closes the same tag.
-        val STRIP_BLOCKS = Regex("(?is)<(script|style|noscript|svg|head|nav|footer|form|template)\\b[^>]*>.*?</\\1>")
-        val BLOCK_BREAK = Regex("(?i)</?(p|div|br|li|tr|h[1-6]|section|article|table|ul|ol|header)\\b[^>]*>")
-        val TAG = Regex("(?s)<[^>]+>")
-        val INLINE_WS = Regex("[ \\t\\x0B\\u000C\\r]+")
+        /**
+         * Overall join budget per page fetch. Slightly above the 8s request timeout so a
+         * normal slow page completes on its own, while a connection that hangs past the
+         * request timeout still can't stall the knowledge turn indefinitely.
+         */
+        const val FETCH_AWAIT_SECONDS = 10L
+
+        //   = non-breaking space: jsoup decodes &nbsp; to it, and the model reads it
+        // better as an ordinary space, so fold it in with the other inline whitespace.
+        val INLINE_WS = Regex("[ \\t\\x0B\\u000C\\r\\u00A0]+")
         val LINE_LEADING_WS = Regex("\\n[ \\t]+")
         val BLANK_LINES = Regex("\\n{3,}")
-        val NUMERIC_ENTITY = Regex("&#(\\d+);")
+
+        /** Non-content elements dropped before text extraction. */
+        const val STRIP_SELECTOR = "script, style, noscript, svg, head, nav, footer, form, template"
+
+        /** Tags whose close should produce a line break, so kit sections don't run together. */
+        val BLOCK_TAGS = setOf(
+            "p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+            "section", "article", "table", "ul", "ol", "header",
+        )
 
         /**
-         * Minimal HTML→text reduction with no external dependency: drop non-content blocks
-         * (scripts, nav, etc.), turn structural tags into line breaks, strip the rest, decode
-         * the few entities that show up in kit text, and collapse whitespace. Not a real DOM
-         * parse — it leaves some menu/footer noise — but it surfaces the ability text, which is
-         * all the brain needs to reconstruct a kit. Pure (companion-scoped) so it can be
-         * unit-tested directly. (Swap in jsoup later if cleaner output matters.)
+         * Reduces an HTML page to readable plain text via a real jsoup DOM parse — robust
+         * against malformed markup, comments, CDATA and nested tags in a way the previous
+         * hand-rolled regex never was, and it decodes every HTML entity correctly. Non-content
+         * elements are removed, block-level closes become line breaks (so a multi-ability kit
+         * keeps its structure), and whitespace is tidied. Companion-scoped + pure, so it stays
+         * unit-testable.
          */
         internal fun htmlToText(html: String): String {
-            var s = STRIP_BLOCKS.replace(html, " ")
-            s = BLOCK_BREAK.replace(s, "\n")
-            s = TAG.replace(s, "")
-            s = decodeEntities(s)
+            val doc = Jsoup.parse(html)
+            doc.select(STRIP_SELECTOR).remove()
+
+            val sb = StringBuilder()
+            val body = doc.body()
+            NodeTraversor.traverse(object : NodeVisitor {
+                override fun head(node: Node, depth: Int) {
+                    if (node is TextNode) sb.append(node.wholeText)
+                }
+
+                override fun tail(node: Node, depth: Int) {
+                    if (node is Element && node.normalName() in BLOCK_TAGS) sb.append('\n')
+                }
+            }, body)
+
+            var s = sb.toString()
             s = s.replace(INLINE_WS, " ")
             s = s.replace(LINE_LEADING_WS, "\n")
             s = s.replace(BLANK_LINES, "\n\n")
             return s.trim()
         }
 
-        internal fun decodeEntities(s: String): String {
-            var r = s
-                .replace("&nbsp;", " ")
-                .replace("&amp;", "&")
-                .replace("&lt;", "<")
-                .replace("&gt;", ">")
-                .replace("&quot;", "\"")
-                .replace("&#39;", "'")
-                .replace("&apos;", "'")
-            r = NUMERIC_ENTITY.replace(r) { m ->
-                m.groupValues[1].toIntOrNull()
-                    ?.let { cp -> runCatching { String(Character.toChars(cp)) }.getOrDefault("") }
-                    ?: m.value
-            }
-            return r
-        }
+        /** Decodes HTML entities (named + numeric) using jsoup's parser. */
+        internal fun decodeEntities(s: String): String = Parser.unescapeEntities(s, false)
     }
 }

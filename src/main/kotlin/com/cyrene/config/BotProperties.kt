@@ -98,6 +98,16 @@ data class BotProperties(
         val numCtx: Int = 16384,
         val numPredict: Int = 512,
         val numThread: Int = 8,
+        /**
+         * Max number of mention/session replies that may run their LLM pipeline at once,
+         * enforced by [com.cyrene.ai.InferenceGate]. A single local Ollama serializes
+         * requests internally, so without a bound a burst of mentions piles up on the
+         * executor and every reply slows to a crawl. When the gate is full, extra requests
+         * get an immediate in-character "busy" reply instead of joining the queue. Keep this
+         * small (default 2); raise it only if Ollama is configured for real parallelism
+         * (OLLAMA_NUM_PARALLEL) and the host has the VRAM/RAM for concurrent generations.
+         */
+        val maxConcurrentInferences: Int = 2,
         val brainTemperature: Double = 0.1,
         val brainTopP: Double = 0.5,
         val voiceTemperature: Double = 0.8,

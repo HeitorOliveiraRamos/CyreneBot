@@ -67,6 +67,11 @@ bot:
     num-ctx: ${OLLAMA_NUM_CTX:16384}
     num-predict: ${OLLAMA_NUM_PREDICT:512}
     num-thread: ${OLLAMA_NUM_THREAD:8}
+    # Max reply pipelines allowed to hit Ollama concurrently. A single local Ollama
+    # serializes requests, so a burst of mentions otherwise piles up and slows every reply.
+    # When full, extra mentions get an immediate "busy" reply. Raise only if Ollama runs
+    # with real parallelism (OLLAMA_NUM_PARALLEL) and the host has the memory for it.
+    max-concurrent-inferences: ${OLLAMA_MAX_CONCURRENT:2}
     # Token budget for the knowledge path (HSR brain extraction + persona retelling).
     # A full kit + its persona rewrite blows past num-predict (512), which is sized for
     # one-line moderation confirmations. Only a ceiling — short replies still stop early.

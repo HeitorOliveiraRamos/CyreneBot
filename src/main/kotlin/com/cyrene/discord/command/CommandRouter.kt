@@ -1,5 +1,6 @@
 package com.cyrene.discord.command
 
+import com.cyrene.discord.util.BotMessages
 import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
 import org.slf4j.LoggerFactory
@@ -22,7 +23,7 @@ class CommandRouter(commands: List<SlashCommand>) : ListenerAdapter() {
         } catch (e: Exception) {
             log.error("Error handling /{}", event.name, e)
             if (!event.isAcknowledged) {
-                event.reply("Ocorreu um erro inesperado.").setEphemeral(true).queue()
+                event.reply(BotMessages.ERROR).setEphemeral(true).queue()
             }
         }
     }

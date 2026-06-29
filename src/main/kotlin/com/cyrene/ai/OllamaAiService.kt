@@ -40,6 +40,7 @@ class OllamaAiService(
     private val promptBuilder: PromptBuilder,
     private val postProcessor: ResponsePostProcessor,
     private val properties: BotProperties,
+    private val metrics: AiMetrics,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -96,12 +97,22 @@ class OllamaAiService(
         val lastUser = history.lastOrNull { it.role == MessageRole.USER }?.content?.trim()
         if (lastUser.isNullOrBlank()) return Intent.CHAT
 
+        // Heuristic fast-path: skip the gate's LLM round-trip for unambiguous greetings/
+        // thanks (the most common mention). Only ever short-circuits to CHAT, never to a
+        // tool-bearing intent, so it can't make a moderation request bypass the brain.
+        fastPathIntent(lastUser)?.let {
+            metrics.count("cyrene.llm.fastpath", "result", "hit")
+            if (log.isDebugEnabled) log.debug("Intent fast-path (no LLM) → {}", it)
+            return it
+        }
+        metrics.count("cyrene.llm.fastpath", "result", "miss")
+
         val messages = listOf(
             SystemMessage(INTENT_GATE_INSTRUCTIONS),
             UserMessage("Mensagem: $lastUser\nResposta:"),
         )
         return try {
-            val response = chatModel.call(Prompt(messages, intentGateOptions()))
+            val response = metrics.timePass("intent_gate") { chatModel.call(Prompt(messages, intentGateOptions())) }
             val raw = response.result.output.text ?: ""
             val intent = parseIntent(raw)
             if (log.isDebugEnabled) log.debug("Intent gate raw='{}' → {}", raw.trim(), intent)
@@ -143,11 +154,13 @@ class OllamaAiService(
 
         logPrompt("brain", messages)
 
-        val raw = chatClient.prompt(Prompt(messages))
-            .options(brainOptions())
-            .toolContext(mapOf(DiscordToolContext.KEY to toolContext))
-            .call()
-            .content() ?: ""
+        val raw = metrics.timePass("brain") {
+            chatClient.prompt(Prompt(messages))
+                .options(brainOptions())
+                .toolContext(mapOf(DiscordToolContext.KEY to toolContext))
+                .call()
+                .content()
+        } ?: ""
         val processed = postProcessor.process(raw)
         return processed.ifBlank {
             log.warn("Brain pass produced empty output (raw='{}'). Using '{}' sentinel.", raw, BRAIN_DONE)
@@ -249,7 +262,7 @@ class OllamaAiService(
 
         logPrompt("voice/focused", voiceMessages)
 
-        val response = chatModel.call(Prompt(voiceMessages, voiceOptions()))
+        val response = metrics.timePass("voice_focused") { chatModel.call(Prompt(voiceMessages, voiceOptions())) }
         val raw = response.result.output.text ?: ""
         return postProcessor.process(raw)
     }
@@ -319,7 +332,7 @@ class OllamaAiService(
 
         logPrompt("voice/knowledge", voiceMessages)
 
-        val response = chatModel.call(Prompt(voiceMessages, knowledgeVoiceOptions()))
+        val response = metrics.timePass("voice_knowledge") { chatModel.call(Prompt(voiceMessages, knowledgeVoiceOptions())) }
         val raw = response.result.output.text ?: ""
         return postProcessor.process(raw)
     }
@@ -342,7 +355,7 @@ class OllamaAiService(
 
         logPrompt("voice/conversational", voiceMessages)
 
-        val response = chatModel.call(Prompt(voiceMessages, voiceOptions()))
+        val response = metrics.timePass("voice_conversational") { chatModel.call(Prompt(voiceMessages, voiceOptions())) }
         val raw = response.result.output.text ?: ""
         return postProcessor.process(raw)
     }
@@ -356,7 +369,7 @@ class OllamaAiService(
      */
     fun chat(history: List<ConversationMessage>): String {
         val messages = promptBuilder.build(history)
-        val response = chatModel.call(Prompt(messages, legacyOptions()))
+        val response = metrics.timePass("legacy") { chatModel.call(Prompt(messages, legacyOptions())) }
         val raw = response.result.output.text ?: ""
         return postProcessor.process(raw)
     }
@@ -460,6 +473,42 @@ class OllamaAiService(
                 s.startsWith("chat") -> Intent.CHAT
                 else -> Intent.CHAT
             }
+        }
+
+        /** Strips a leading "[name]: " speaker tag that the mention path prepends to turns. */
+        private val SPEAKER_PREFIX = Regex("^\\[[^\\]]*]:\\s*")
+
+        /**
+         * Exact-match whitelist of obviously-conversational openers that need no LLM
+         * classification. Kept deliberately tight: anything not listed here falls through to
+         * the real gate, so the cost of being wrong is only a missed optimisation, never a
+         * misroute.
+         */
+        private val OBVIOUS_CHAT = setOf(
+            "oi", "ola", "olá", "oii", "oie", "opa", "eai", "e ai", "e aí", "salve",
+            "bom dia", "boa tarde", "boa noite",
+            "obrigado", "obrigada", "obg", "brigado", "brigada", "valeu", "vlw",
+            "tudo bem", "tudo certo", "blz", "beleza",
+            "tchau", "flw", "falou", "até mais", "ate mais",
+            "kkk", "kkkk", "kkkkk", "haha", "hahaha", "rs",
+        )
+
+        /**
+         * Pre-LLM heuristic for the intent gate. Returns [Intent.CHAT] for the small set of
+         * unambiguously-conversational messages and null for everything else (so the LLM gate
+         * still decides). It only ever short-circuits to CHAT — never to a tool-bearing
+         * intent — and matches only after stripping a leading "[name]:" speaker tag and
+         * trailing punctuation, so a moderation/HSR request can never slip through it. Pure,
+         * so it is unit-testable without a model.
+         */
+        internal fun fastPathIntent(lastUserMessage: String): Intent? {
+            val s = SPEAKER_PREFIX.replace(lastUserMessage.trim(), "")
+                .lowercase()
+                .trim()
+                .trimEnd('.', '!', '?', ',')
+                .trim()
+            if (s.isEmpty()) return Intent.CHAT
+            return if (s in OBVIOUS_CHAT) Intent.CHAT else null
         }
 
         /**

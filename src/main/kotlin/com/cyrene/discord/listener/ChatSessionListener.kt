@@ -1,5 +1,6 @@
 package com.cyrene.discord.listener
 
+import com.cyrene.ai.InferenceGate
 import com.cyrene.ai.OllamaAiService
 import com.cyrene.config.BotProperties
 import com.cyrene.conversation.ConversationMessage
@@ -7,6 +8,7 @@ import com.cyrene.conversation.ConversationService
 import com.cyrene.conversation.MessageRole
 import com.cyrene.conversation.UsuarioService
 import com.cyrene.discord.tools.DiscordToolContext
+import com.cyrene.discord.util.BotMessages
 import com.cyrene.discord.util.DiscordMessageSender
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
@@ -37,6 +39,7 @@ class ChatSessionListener(
     private val usuarioService: UsuarioService,
     private val properties: BotProperties,
     private val executor: Executor,
+    private val inferenceGate: InferenceGate,
 ) : ListenerAdapter() {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -71,31 +74,49 @@ class ChatSessionListener(
             channelId = channelId,
         )
 
-        CompletableFuture
-            .supplyAsync(
-                {
-                    val resolved = usuarioService.resolveForEvent(event)
-                    ai.chatBrainAndVoice(
-                        history = historyForAi,
-                        toolContext = toolContext,
-                        extraSystemPrompt = resolved?.systemPrompt,
-                        userName = resolved?.effectiveName,
-                    )
-                },
-                executor,
-            )
-            .thenAccept { reply ->
-                val persisted = conversations.recordExchange(conversationId, content, reply)
-                if (!persisted) {
-                    log.debug("Skipped recording exchange for conv {} — no longer active", conversationId)
+        // Share the same concurrency ceiling as the mention path so an active session and a
+        // burst of mentions can't together overload the single Ollama. When full, ask the
+        // user to retry rather than queueing behind a slow generation.
+        if (!inferenceGate.tryAcquire()) {
+            message.reply(BotMessages.BUSY_SESSION).queue()
+            return
+        }
+
+        try {
+            CompletableFuture
+                .supplyAsync(
+                    {
+                        val resolved = usuarioService.resolveForEvent(event)
+                        ai.chatBrainAndVoice(
+                            history = historyForAi,
+                            toolContext = toolContext,
+                            extraSystemPrompt = resolved?.systemPrompt,
+                            userName = resolved?.effectiveName,
+                        )
+                    },
+                    executor,
+                )
+                // Single completion handler so the gate permit is released exactly once.
+                .whenComplete { reply, ex ->
+                    try {
+                        if (ex != null) {
+                            log.error("Failed to process chat-session message for conv {}", conversationId, ex)
+                            message.reply(BotMessages.ERROR).queue()
+                        } else {
+                            val persisted = conversations.recordExchange(conversationId, content, reply)
+                            if (!persisted) {
+                                log.debug("Skipped recording exchange for conv {} — no longer active", conversationId)
+                            }
+                            sender.replyLong(message, reply)
+                        }
+                    } finally {
+                        inferenceGate.release()
+                    }
                 }
-                sender.replyLong(message, reply)
-            }
-            .exceptionally { ex ->
-                log.error("Failed to process chat-session message for conv {}", conversationId, ex)
-                message.reply("Desculpe, ocorreu um erro inesperado ao tentar obter uma resposta.")
-                    .queue()
-                null
-            }
+        } catch (e: Exception) {
+            inferenceGate.release()
+            log.error("Failed to submit chat-session work for conv {}", conversationId, e)
+            message.reply(BotMessages.ERROR).queue()
+        }
     }
 }

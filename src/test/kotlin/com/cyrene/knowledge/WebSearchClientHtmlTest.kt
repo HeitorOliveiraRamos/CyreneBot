@@ -50,5 +50,28 @@ class WebSearchClientHtmlTest {
         assertEquals("'y'", WebSearchClient.decodeEntities("&#39;y&#39;"))
         // &#233; is the accented e (U+00E9) common in character/kit names.
         assertEquals("café", WebSearchClient.decodeEntities("caf&#233;"))
+        // Named accented entity — the old hand-rolled table only knew a handful; jsoup knows all.
+        assertEquals("café", WebSearchClient.decodeEntities("caf&eacute;"))
+    }
+
+    @Test
+    fun `htmlToText recovers text from malformed unclosed markup`() {
+        val out = WebSearchClient.htmlToText("<p>Acheron <b>dano massivo<p>caminho Nihility")
+        assertTrue(out.contains("Acheron"))
+        assertTrue(out.contains("dano massivo"))
+        assertTrue(out.contains("caminho Nihility"))
+    }
+
+    @Test
+    fun `htmlToText drops HTML comments`() {
+        val out = WebSearchClient.htmlToText("<p>antes<!-- oculto -->depois</p>")
+        assertFalse(out.contains("oculto"))
+        assertTrue(out.contains("antes"))
+        assertTrue(out.contains("depois"))
+    }
+
+    @Test
+    fun `htmlToText folds non-breaking spaces into ordinary spaces`() {
+        assertEquals("a b", WebSearchClient.htmlToText("<p>a&nbsp;b</p>"))
     }
 }

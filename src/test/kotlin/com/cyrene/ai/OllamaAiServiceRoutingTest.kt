@@ -82,4 +82,38 @@ class OllamaAiServiceRoutingTest {
     fun `selectVoicePath narrates a real result tersely when the intent is not KNOWLEDGE`() {
         assertEquals(VoicePath.FOCUSED, OllamaAiService.selectVoicePath("Algum resultado real.", Intent.CHAT))
     }
+
+    @Test
+    fun `fastPathIntent short-circuits obvious greetings and thanks to CHAT`() {
+        for (msg in listOf("oi", "Oi", "OLÁ", "bom dia", "boa noite!", "obrigado.", "valeu!!!", "tudo bem?", "kkk")) {
+            assertEquals(Intent.CHAT, OllamaAiService.fastPathIntent(msg), "expected fast-path CHAT for '$msg'")
+        }
+    }
+
+    @Test
+    fun `fastPathIntent strips a leading speaker tag before matching`() {
+        assertEquals(Intent.CHAT, OllamaAiService.fastPathIntent("[Heitor]: oi"))
+        assertEquals(Intent.CHAT, OllamaAiService.fastPathIntent("[Ana Maria]: boa noite"))
+    }
+
+    @Test
+    fun `fastPathIntent treats blank input as CHAT`() {
+        assertEquals(Intent.CHAT, OllamaAiService.fastPathIntent("   "))
+        assertEquals(Intent.CHAT, OllamaAiService.fastPathIntent("[Heitor]:   "))
+    }
+
+    @Test
+    fun `fastPathIntent returns null (defer to the LLM gate) for anything non-trivial`() {
+        // Crucially, a moderation or HSR request must NEVER be fast-pathed.
+        for (msg in listOf(
+            "muta o <@123> por 10 minutos",
+            "bane o fulano",
+            "quem é a Acheron?",
+            "oi, muta o fulano",   // greeting glued to a real request
+            "valeu mano",          // not an exact whitelist match
+            "me conta uma história",
+        )) {
+            assertEquals(null, OllamaAiService.fastPathIntent(msg), "'$msg' must defer to the LLM gate")
+        }
+    }
 }

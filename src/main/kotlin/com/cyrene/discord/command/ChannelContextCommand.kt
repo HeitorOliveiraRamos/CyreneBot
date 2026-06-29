@@ -4,6 +4,7 @@ import com.cyrene.ai.OllamaAiService
 import com.cyrene.config.BotProperties
 import com.cyrene.conversation.ConversationMessage
 import com.cyrene.conversation.MessageRole
+import com.cyrene.discord.util.BotMessages
 import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent
 import net.dv8tion.jda.api.interactions.commands.build.CommandData
 import net.dv8tion.jda.api.interactions.commands.build.Commands
@@ -53,9 +54,7 @@ class ChannelContextCommand(
                     .thenAccept { summary -> event.hook.sendMessage(summary).queue() }
                     .exceptionally { ex ->
                         log.error("Failed to summarize channel context", ex)
-                        event.hook.sendMessage(
-                            "Desculpe, ocorreu um erro inesperado ao processar sua solicitação de resumo."
-                        ).queue()
+                        event.hook.sendMessage(BotMessages.ERROR).queue()
                         null
                     }
             },
