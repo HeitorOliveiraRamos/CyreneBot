@@ -16,6 +16,7 @@ import net.dv8tion.jda.api.hooks.ListenerAdapter
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 
@@ -45,7 +46,14 @@ class MentionReplyListener(
 ) : ListenerAdapter() {
 
     private val log = LoggerFactory.getLogger(javaClass)
-    private val cooldowns = mutableMapOf<String, Long>()
+
+    /**
+     * Per-user last-reply timestamps for the [BotProperties.Reply.cooldownSeconds] gate.
+     * MUST be concurrent: JDA dispatches `onMessageReceived` on multiple gateway threads,
+     * and a plain `HashMap` mutated concurrently can corrupt its internal state (or spin on
+     * resize). Pruned in [registerCooldown] so it can't grow without bound on a busy server.
+     */
+    private val cooldowns = ConcurrentHashMap<String, Long>()
 
     override fun onMessageReceived(event: MessageReceivedEvent) {
         if (event.author.isBot) return
@@ -79,7 +87,7 @@ class MentionReplyListener(
             ).queue()
             return
         }
-        cooldowns[userId] = now
+        registerCooldown(userId, now, cooldownSeconds)
 
         val toolContext = DiscordToolContext(
             callerUserId = event.author.id,
@@ -141,21 +149,7 @@ class MentionReplyListener(
         selfUserId: String,
     ): List<ConversationMessage> = buildList {
         if (chain.isNotEmpty()) {
-            chain.forEach { entry ->
-                val text = when {
-                    entry.role == MessageRole.ASSISTANT -> entry.content
-                    entry.isOtherBot -> "[outro bot ${entry.authorName}]: ${entry.content}"
-                    else -> "[${entry.authorName}]: ${entry.content}"
-                }
-                add(ConversationMessage(conversationId = 0L, role = entry.role, content = text))
-            }
-            add(
-                ConversationMessage(
-                    conversationId = 0L,
-                    role = MessageRole.USER,
-                    content = "[$currentUserName]: $currentContent",
-                )
-            )
+            addAll(historyFromChain(chain, currentUserName, currentContent))
         } else {
             // If chain resolution failed but the message is a direct reply, include
             // the referenced message as context. If the referenced message was from
@@ -186,6 +180,55 @@ class MentionReplyListener(
                     conversationId = 0L,
                     role = MessageRole.USER,
                     content = currentContent,
+                )
+            )
+        }
+    }
+
+    /**
+     * Records [userId]'s cooldown timestamp, then opportunistically evicts entries older
+     * than the cooldown window once the map crosses [COOLDOWN_MAX_ENTRIES] — bounding memory
+     * on a busy server without a background sweeper. Expired entries are inert anyway (the
+     * gate treats a missing entry the same as a long-ago one), so pruning never changes
+     * behaviour.
+     */
+    private fun registerCooldown(userId: String, now: Long, cooldownSeconds: Long) {
+        cooldowns[userId] = now
+        if (cooldowns.size > COOLDOWN_MAX_ENTRIES) {
+            val cutoff = now - TimeUnit.SECONDS.toMillis(cooldownSeconds)
+            cooldowns.entries.removeIf { it.value < cutoff }
+        }
+    }
+
+    internal companion object {
+        /** Soft cap above which [registerCooldown] prunes expired cooldown entries. */
+        private const val COOLDOWN_MAX_ENTRIES = 10_000
+
+        /**
+         * Pure mapping of a resolved reply [chain] (oldest → newest) plus the current user
+         * turn into LLM history. Each human/other-bot turn is prefixed with `[name]:` so the
+         * voice model can tell speakers apart; Cyrene's own turns stay unprefixed (they map
+         * to the assistant role). Extracted from [buildHistory] so this prefixing contract
+         * is unit-testable without a live JDA [Message].
+         */
+        internal fun historyFromChain(
+            chain: List<ChainEntry>,
+            currentUserName: String,
+            currentContent: String,
+        ): List<ConversationMessage> = buildList {
+            chain.forEach { entry ->
+                val text = when {
+                    entry.role == MessageRole.ASSISTANT -> entry.content
+                    entry.isOtherBot -> "[outro bot ${entry.authorName}]: ${entry.content}"
+                    else -> "[${entry.authorName}]: ${entry.content}"
+                }
+                add(ConversationMessage(conversationId = 0L, role = entry.role, content = text))
+            }
+            add(
+                ConversationMessage(
+                    conversationId = 0L,
+                    role = MessageRole.USER,
+                    content = "[$currentUserName]: $currentContent",
                 )
             )
         }

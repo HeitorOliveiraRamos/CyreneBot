@@ -59,9 +59,12 @@ bot:
   voice-model-name: ${VOICE_MODEL_NAME:llama3.1}
   # Ollama inference tuning. These are applied at every call site by OllamaAiService
   # because per-prompt OllamaOptions replace Spring AI's chat.options defaults.
-  # Raise num-ctx only if prompts are actually long — larger ctx grows the KV cache.
+  # num-ctx default (16384) is sized for the knowledge path's web-fetch budget (see
+  # web-fetch-char-limit below); a smaller ctx silently truncates fetched page text and
+  # clips kit numbers. Lower it only if memory-constrained and not using deep web fetches —
+  # larger ctx grows the KV cache.
   performance:
-    num-ctx: ${OLLAMA_NUM_CTX:4096}
+    num-ctx: ${OLLAMA_NUM_CTX:16384}
     num-predict: ${OLLAMA_NUM_PREDICT:512}
     num-thread: ${OLLAMA_NUM_THREAD:8}
     # Token budget for the knowledge path (HSR brain extraction + persona retelling).

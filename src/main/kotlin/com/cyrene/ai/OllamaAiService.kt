@@ -102,16 +102,10 @@ class OllamaAiService(
         )
         return try {
             val response = chatModel.call(Prompt(messages, intentGateOptions()))
-            val raw = (response.result.output.text ?: "").trim().lowercase()
-            when {
-                raw.startsWith("mod") -> Intent.MODERATION
-                raw.startsWith("kb") -> Intent.KNOWLEDGE
-                raw.startsWith("chat") -> Intent.CHAT
-                else -> {
-                    log.debug("Intent gate produced unrecognised output '{}'; defaulting to CHAT", raw)
-                    Intent.CHAT
-                }
-            }
+            val raw = response.result.output.text ?: ""
+            val intent = parseIntent(raw)
+            if (log.isDebugEnabled) log.debug("Intent gate raw='{}' → {}", raw.trim(), intent)
+            intent
         } catch (e: Exception) {
             log.warn("Intent gate failed; defaulting to CHAT", e)
             Intent.CHAT
@@ -124,7 +118,10 @@ class OllamaAiService(
      * MODERATION for Discord actions, KNOWLEDGE for Honkai: Star Rail questions that must
      * be grounded via `lookupHsr` / `searchWeb` instead of answered from the model's memory.
      */
-    private enum class Intent { CHAT, MODERATION, KNOWLEDGE }
+    internal enum class Intent { CHAT, MODERATION, KNOWLEDGE }
+
+    /** Which voice rendering [runVoicePass] dispatches to, as decided by [selectVoicePath]. */
+    internal enum class VoicePath { KNOWLEDGE, FOCUSED, CONVERSATIONAL }
 
     /**
      * Brain pass in isolation. Persona excluded, tools attached. The model gets only
@@ -178,11 +175,9 @@ class OllamaAiService(
         intent: Intent,
     ): String {
         val trimmed = brainOutput.trim()
-        val brainHasAction = trimmed.isNotBlank() &&
-            !trimmed.equals(BRAIN_NO_ACTION, ignoreCase = true) &&
-            !trimmed.equals(BRAIN_DONE, ignoreCase = true)
 
-        // Three voice paths, picked by intent + whether the brain produced a real result:
+        // Three voice paths, picked by intent + whether the brain produced a real result
+        // (see [selectVoicePath] for the pure decision):
         //
         //  - KNOWLEDGE with a result → [runVoicePassKnowledge]: keep ALL the detail. A
         //    full kit must survive, so this path does NOT cap length and explicitly
@@ -194,13 +189,10 @@ class OllamaAiService(
         //    anchor makes it just narrate the result.
         //  - no action (brain returned NO_ACTION/DONE) → [runVoicePassConversational]:
         //    keep full history so the voice carries on the chat naturally.
-        return when {
-            brainHasAction && intent == Intent.KNOWLEDGE ->
-                runVoicePassKnowledge(history, trimmed, extraSystemPrompt, userName)
-            brainHasAction ->
-                runVoicePassFocused(trimmed, extraSystemPrompt, userName)
-            else ->
-                runVoicePassConversational(history, extraSystemPrompt, userName)
+        return when (selectVoicePath(brainOutput, intent)) {
+            VoicePath.KNOWLEDGE -> runVoicePassKnowledge(history, trimmed, extraSystemPrompt, userName)
+            VoicePath.FOCUSED -> runVoicePassFocused(trimmed, extraSystemPrompt, userName)
+            VoicePath.CONVERSATIONAL -> runVoicePassConversational(history, extraSystemPrompt, userName)
         }
     }
 
@@ -450,7 +442,46 @@ class OllamaAiService(
             .numThread(properties.performance.numThread)
             .build()
 
-    private companion object {
+    internal companion object {
+
+        /**
+         * Maps the intent gate's raw single-word output to an [Intent]. Pure and
+         * side-effect-free so the routing contract can be unit-tested without invoking the
+         * model. Matching is prefix-based and case-insensitive (the model occasionally adds
+         * trailing punctuation or whitespace despite the prompt), and ANY unrecognised
+         * output defaults to [Intent.CHAT] — the safe fallback, since CHAT can never misfire
+         * a moderation tool (the voice-only pass has no tools attached).
+         */
+        internal fun parseIntent(raw: String): Intent {
+            val s = raw.trim().lowercase()
+            return when {
+                s.startsWith("mod") -> Intent.MODERATION
+                s.startsWith("kb") -> Intent.KNOWLEDGE
+                s.startsWith("chat") -> Intent.CHAT
+                else -> Intent.CHAT
+            }
+        }
+
+        /**
+         * Decides which voice rendering to use from the brain's output and the gate intent.
+         * Pure, so the dispatch in [runVoicePass] is unit-testable without invoking a model.
+         * A brain output that is blank or one of the [BRAIN_NO_ACTION] / [BRAIN_DONE]
+         * sentinels counts as "no action": the voice continues the chat conversationally.
+         * Otherwise a KNOWLEDGE intent retells the gathered facts in full; any other action
+         * (moderation / Discord state) is narrated tersely with history stripped.
+         */
+        internal fun selectVoicePath(brainOutput: String, intent: Intent): VoicePath {
+            val trimmed = brainOutput.trim()
+            val brainHasAction = trimmed.isNotBlank() &&
+                !trimmed.equals(BRAIN_NO_ACTION, ignoreCase = true) &&
+                !trimmed.equals(BRAIN_DONE, ignoreCase = true)
+            return when {
+                brainHasAction && intent == Intent.KNOWLEDGE -> VoicePath.KNOWLEDGE
+                brainHasAction -> VoicePath.FOCUSED
+                else -> VoicePath.CONVERSATIONAL
+            }
+        }
+
         /**
          * Intent gate system prompt. Forces a single-word PT-BR classification of the
          * last user turn. Returning "mod" routes through the tool-aware brain; anything

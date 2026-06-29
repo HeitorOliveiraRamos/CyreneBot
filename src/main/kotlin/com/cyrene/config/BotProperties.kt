@@ -79,8 +79,11 @@ data class BotProperties(
      * Ollama options of the same name and override Spring AI's defaults because
      * [com.cyrene.ai.OllamaAiService] builds per-prompt [org.springframework.ai.ollama.api.OllamaOptions].
      *
-     *  - [numCtx]: context window. Default 2048 is small but matches typical history sizes;
-     *    raise only if you actually feed long prompts. Larger ctx allocates more KV cache.
+     *  - [numCtx]: context window. Default 16384 is sized for the knowledge path, whose
+     *    worst case feeds ~2×18000 chars of fetched web text (see [Knowledge.webFetchCharLimit])
+     *    plus the brain prompt and reply budget; a smaller ctx would silently truncate that
+     *    web text and clip kit numbers. Lower it (and/or [Knowledge.webFetchPages]) only if
+     *    you're memory-constrained and don't use deep web fetches — larger ctx grows the KV cache.
      *  - [numPredict]: hard cap on generated tokens. Prevents runaway replies.
      *  - [numThread]: CPU threads. Ignored when the model fits fully on GPU; set to your
      *    physical core count if any layers spill to CPU.
@@ -92,7 +95,7 @@ data class BotProperties(
      *    persona drift.
      */
     data class Performance(
-        val numCtx: Int = 4096,
+        val numCtx: Int = 16384,
         val numPredict: Int = 512,
         val numThread: Int = 8,
         val brainTemperature: Double = 0.1,

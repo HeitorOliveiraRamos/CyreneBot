@@ -336,6 +336,14 @@ class DiscordTools(
         "manageGuild" to member.hasPermission(Permission.MANAGE_SERVER),
     )
 
-    private fun isSnowflake(s: String): Boolean =
-        s.isNotEmpty() && s.length in 5..20 && s.all(Char::isDigit)
+    internal companion object {
+        /**
+         * Validates a Discord snowflake: a non-empty numeric id of plausible length. Targets
+         * are accepted only as snowflakes (never by name) so the model can't act on the wrong
+         * user when display names collide. Companion-scoped so this safety check is
+         * unit-testable without a live JDA.
+         */
+        internal fun isSnowflake(s: String): Boolean =
+            s.isNotEmpty() && s.length in 5..20 && s.all(Char::isDigit)
+    }
 }

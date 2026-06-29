@@ -145,42 +145,7 @@ class WebSearchClient(
         }
     }
 
-    /**
-     * Minimal HTML→text reduction with no external dependency: drop non-content blocks
-     * (scripts, nav, etc.), turn structural tags into line breaks, strip the rest, decode
-     * the few entities that show up in kit text, and collapse whitespace. Not a real DOM
-     * parse — it leaves some menu/footer noise — but it surfaces the ability text, which is
-     * all the brain needs to reconstruct a kit. (Swap in jsoup later if cleaner output matters.)
-     */
-    private fun htmlToText(html: String): String {
-        var s = STRIP_BLOCKS.replace(html, " ")
-        s = BLOCK_BREAK.replace(s, "\n")
-        s = TAG.replace(s, "")
-        s = decodeEntities(s)
-        s = s.replace(INLINE_WS, " ")
-        s = s.replace(LINE_LEADING_WS, "\n")
-        s = s.replace(BLANK_LINES, "\n\n")
-        return s.trim()
-    }
-
-    private fun decodeEntities(s: String): String {
-        var r = s
-            .replace("&nbsp;", " ")
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&apos;", "'")
-        r = NUMERIC_ENTITY.replace(r) { m ->
-            m.groupValues[1].toIntOrNull()
-                ?.let { cp -> runCatching { String(Character.toChars(cp)) }.getOrDefault("") }
-                ?: m.value
-        }
-        return r
-    }
-
-    private companion object {
+    internal companion object {
         /** Hard cap on raw HTML processed, so a pathological page can't make the regexes crawl. */
         const val MAX_HTML_CHARS = 500_000
 
@@ -192,5 +157,41 @@ class WebSearchClient(
         val LINE_LEADING_WS = Regex("\\n[ \\t]+")
         val BLANK_LINES = Regex("\\n{3,}")
         val NUMERIC_ENTITY = Regex("&#(\\d+);")
+
+        /**
+         * Minimal HTML→text reduction with no external dependency: drop non-content blocks
+         * (scripts, nav, etc.), turn structural tags into line breaks, strip the rest, decode
+         * the few entities that show up in kit text, and collapse whitespace. Not a real DOM
+         * parse — it leaves some menu/footer noise — but it surfaces the ability text, which is
+         * all the brain needs to reconstruct a kit. Pure (companion-scoped) so it can be
+         * unit-tested directly. (Swap in jsoup later if cleaner output matters.)
+         */
+        internal fun htmlToText(html: String): String {
+            var s = STRIP_BLOCKS.replace(html, " ")
+            s = BLOCK_BREAK.replace(s, "\n")
+            s = TAG.replace(s, "")
+            s = decodeEntities(s)
+            s = s.replace(INLINE_WS, " ")
+            s = s.replace(LINE_LEADING_WS, "\n")
+            s = s.replace(BLANK_LINES, "\n\n")
+            return s.trim()
+        }
+
+        internal fun decodeEntities(s: String): String {
+            var r = s
+                .replace("&nbsp;", " ")
+                .replace("&amp;", "&")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replace("&apos;", "'")
+            r = NUMERIC_ENTITY.replace(r) { m ->
+                m.groupValues[1].toIntOrNull()
+                    ?.let { cp -> runCatching { String(Character.toChars(cp)) }.getOrDefault("") }
+                    ?: m.value
+            }
+            return r
+        }
     }
 }
