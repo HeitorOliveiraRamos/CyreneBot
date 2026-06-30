@@ -107,14 +107,18 @@ bot:
 
   # Honkai: Star Rail knowledge base (RAG). Feeds the lookupHsr / searchWeb tools.
   knowledge:
-    # Directory holding the Kaggle CSV/JSON files to ingest. Each .csv/.json file becomes
-    # a set of Documents (one per row/object). Relative to the working directory.
+    # Legacy Kaggle CSV dir (unused since nanoka became the reindex source; kept for reference).
     data-dir: ${HSR_DATA_DIR:./data/hsr}
-    # When true, the ingestion runner wipes `vector_store` and re-embeds everything on
-    # startup, then the bot continues normally. Leave false in production — flip it on for
-    # a single run after dropping new datasets in data-dir:
+    # When true, the ingestion runner wipes `vector_store` and re-embeds everything from
+    # nanoka on startup, then the bot continues normally. Leave false in production — flip it
+    # on for a single run after a new patch:
     #   HSR_REINDEX=true java -jar cyrene-bot.jar    (or mvn spring-boot:run)
     reindex: ${HSR_REINDEX:false}
+    # nanoka.cc data source for the reindex (structured JSON, no scraping). The patch version
+    # is auto-discovered from the home page; pin it via HSR_NANOKA_VERSION to freeze a patch.
+    nanoka-home-url: ${HSR_NANOKA_HOME:https://hsr.nanoka.cc/}
+    nanoka-cdn-url: ${HSR_NANOKA_CDN:https://static.nanoka.cc/hsr}
+    nanoka-version: ${HSR_NANOKA_VERSION:}
     # How many documents to embed+insert per batch during ingestion. Lower if Ollama
     # times out on big batches; raise to go faster.
     batch-size: ${HSR_INGEST_BATCH:64}

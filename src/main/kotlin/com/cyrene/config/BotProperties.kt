@@ -137,10 +137,16 @@ data class BotProperties(
      *  - [similarityThreshold]: minimum cosine similarity for a chunk to count as a hit;
      *    below it, `lookupHsr` reports nothing so the brain can fall back to `searchWeb`.
      *  - [searxngUrl]: optional self-hosted SearXNG JSON endpoint; blank disables web search.
+     *  - [nanokaHomeUrl] / [nanokaCdnUrl] / [nanokaVersion]: source for the reindex
+     *    ([NanokaIngestionSource]). The data version is auto-discovered from the home page;
+     *    set [nanokaVersion] (blank/null = auto) to pin a specific patch.
      */
     data class Knowledge(
         val dataDir: String = "./data/hsr",
         val reindex: Boolean = false,
+        val nanokaHomeUrl: String = "https://hsr.nanoka.cc/",
+        val nanokaCdnUrl: String = "https://static.nanoka.cc/hsr",
+        val nanokaVersion: String? = null,
         val batchSize: Int = 64,
         val topK: Int = 5,
         val similarityThreshold: Double = 0.55,
