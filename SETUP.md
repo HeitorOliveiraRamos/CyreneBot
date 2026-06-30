@@ -55,14 +55,16 @@ cp .env.example .env
 
 ## 6. Construir a base de conhecimento (uma vez)
 
-Os CSVs estão no git (`src/main/resources/hsrdataset`), mas os **embeddings ficam no Postgres**,
-então toda DB nova precisa rodar o reindex uma vez:
+Os dados vêm do nanoka.cc (JSON estruturado, baixado na hora) e os **embeddings ficam no
+Postgres**, então toda DB nova — ou cada novo patch — precisa rodar o reindex uma vez:
 
 ```bash
 export JAVA_HOME=$(/usr/libexec/java_home -v 21)
 set -a; source .env; set +a
 HSR_REINDEX=true mvn spring-boot:run     # espere "HSR reindex complete", Ctrl-C
 ```
+> A versão do patch é descoberta automaticamente na home do nanoka; fixe com
+> `HSR_NANOKA_VERSION=x.y.z` se quiser travar um patch.
 
 ## 7. Web search (opcional — SearXNG)
 

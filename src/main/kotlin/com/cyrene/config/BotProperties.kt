@@ -129,7 +129,6 @@ data class BotProperties(
      * [com.cyrene.discord.tools.GameKnowledgeTools], plus the one-shot ingestion runner
      * [com.cyrene.knowledge.HsrKnowledgeIngestion].
      *
-     *  - [dataDir]: folder of Kaggle CSV/JSON files to ingest.
      *  - [reindex]: when true, the ingestion runner wipes and rebuilds the vector store on
      *    startup. A run-once switch — keep false in normal operation.
      *  - [batchSize]: documents embedded+inserted per batch during ingestion.
@@ -142,7 +141,6 @@ data class BotProperties(
      *    set [nanokaVersion] (blank/null = auto) to pin a specific patch.
      */
     data class Knowledge(
-        val dataDir: String = "./data/hsr",
         val reindex: Boolean = false,
         val nanokaHomeUrl: String = "https://hsr.nanoka.cc/",
         val nanokaCdnUrl: String = "https://static.nanoka.cc/hsr",

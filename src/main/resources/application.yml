@@ -107,8 +107,6 @@ bot:
 
   # Honkai: Star Rail knowledge base (RAG). Feeds the lookupHsr / searchWeb tools.
   knowledge:
-    # Legacy Kaggle CSV dir (unused since nanoka became the reindex source; kept for reference).
-    data-dir: ${HSR_DATA_DIR:./data/hsr}
     # When true, the ingestion runner wipes `vector_store` and re-embeds everything from
     # nanoka on startup, then the bot continues normally. Leave false in production — flip it
     # on for a single run after a new patch:
