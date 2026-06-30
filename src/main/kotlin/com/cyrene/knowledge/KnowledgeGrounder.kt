@@ -71,10 +71,16 @@ class KnowledgeGrounder(
         return Grounding.EMPTY
     }
 
-    /** True unless this is a bare entity question whose subject never appears in [context]. */
+    /**
+     * True unless this is an entity question and SOME asked-about name never appears in
+     * [context]. Every name in a "quem é X? quem é Y?" (or "X, Y e Z") batch must be grounded;
+     * one ungrounded name fails the whole answer, because the model will otherwise fuse real
+     * retrieved lore onto the fake name (that's the "Cora/Carmilla/Sylph" failure).
+     */
     private fun passesRosterGuard(query: String, context: String): Boolean {
-        val subject = entitySubject(query) ?: return true
-        return subjectMentioned(subject, context)
+        val subjects = entitySubjects(query)
+        if (subjects.isEmpty()) return true
+        return subjects.all { subjectMentioned(it, context) }
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -97,38 +103,53 @@ class KnowledgeGrounder(
     }
 
     internal companion object {
-        /** Bare "who/what is X" openers, the questions where existence itself is in doubt. */
-        private val ENTITY_Q = Regex(
-            "^\\s*(quem (é|e|eh|seria)|o que (é|e|eh)|who is|what is)\\s+",
+        /** "who/what is X" openers, the questions where existence itself is in doubt. */
+        private val ENTITY_OPENER = Regex(
+            "(quem (são|sao|é|e|eh|seria)|o que (é|e|eh)|who is|what is)\\s+",
             RegexOption.IGNORE_CASE,
         )
+
+        /** Separators inside a name list: "cora, carmilla e sylph". */
+        private val LIST_SEP = Regex(",| e | and |;", RegexOption.IGNORE_CASE)
         private val LEADING_ARTICLE = Regex("^(a|o|as|os|the)\\s+", RegexOption.IGNORE_CASE)
+        private val WHITESPACE = Regex("\\s+")
 
         /**
-         * Extracts the subject of a bare entity question ("quem é lilita?" → "lilita"), or null
-         * when the query isn't that shape (builds, teams, mechanics — the roster guard doesn't
-         * apply to those). Pure, so the guard is unit-testable without a vector store.
+         * Every entity name asked about, handling both repeated openers ("quem é X? quem é Y?")
+         * and a single opener over a list ("quem é X, Y e Z?"). Empty when the query isn't an
+         * entity question (builds, teams, mechanics — the roster guard doesn't apply to those).
+         * Pure, so the whole guard is unit-testable without a vector store.
          */
-        internal fun entitySubject(query: String): String? {
-            val m = ENTITY_Q.find(query) ?: return null
-            val rest = query.substring(m.range.last + 1)
-                .trim()
-                .trimEnd('?', '.', '!', ',', ';')
-                .let { LEADING_ARTICLE.replace(it, "") }
-                .trim()
-            return rest.takeIf { it.isNotBlank() }
+        internal fun entitySubjects(query: String): List<String> {
+            val parts = query.split(ENTITY_OPENER)
+            if (parts.size <= 1) return emptyList()
+            return parts.drop(1).flatMap { seg ->
+                // The name(s) run until the question mark / period that ends this sub-question.
+                val head = seg.substringBefore('?').substringBefore('.').trim()
+                head.split(LIST_SEP).map { cleanName(it) }.filter { it.isNotBlank() }
+            }
         }
 
+        private fun cleanName(raw: String): String =
+            LEADING_ARTICLE.replace(raw.trim(), "").trim().trimEnd('?', '.', '!', ',', ';').trim()
+
         /**
-         * True when at least one significant token of [subject] appears in [context]. Tokens
-         * shorter than 3 chars are ignored (articles/particles), and an all-short subject
-         * can't be judged so it passes — the guard only ever fires on a clear absence, never
-         * on uncertainty, so it can't suppress a legitimately-new character the source names.
+         * True only when EVERY significant token (>= 3 chars) of [subject] appears in [context]
+         * as a whole word. Two deliberate choices, each fixing a way a fake name slipped through:
+         *  - whole-word + Unicode-aware ((?iuU)\b…\b): a plain substring match finds "cora"
+         *    inside "coração", which is precisely how "Cora" passed against real lore text;
+         *  - ALL tokens, not any: stops one common token ("nova" in "vida nova") from grounding a
+         *    fabricated multi-word name.
+         * A subject with no token >= 3 chars can't be judged, so it passes — the guard only ever
+         * fires on a clear absence, never suppressing a legitimately-new character the source names.
          */
         internal fun subjectMentioned(subject: String, context: String): Boolean {
-            val tokens = subject.split(Regex("\\s+")).filter { it.length >= 3 }
+            val tokens = subject.split(WHITESPACE).filter { it.length >= 3 }
             if (tokens.isEmpty()) return true
-            return tokens.any { context.contains(it, ignoreCase = true) }
+            return tokens.all { wordPresent(it, context) }
         }
+
+        private fun wordPresent(token: String, context: String): Boolean =
+            Regex("(?iuU)\\b" + Regex.escape(token) + "\\b").containsMatchIn(context)
     }
 }

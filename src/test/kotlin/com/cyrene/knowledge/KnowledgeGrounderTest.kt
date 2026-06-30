@@ -3,51 +3,64 @@ package com.cyrene.knowledge
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
  * Unit tests for the roster-guard primitives — the pure heart of the anti-invention gate.
- * [KnowledgeGrounder.entitySubject] pulls the subject out of a bare "quem é X" question, and
+ * [KnowledgeGrounder.entitySubjects] pulls every asked-about name out of a question, and
  * [KnowledgeGrounder.subjectMentioned] decides whether the retrieved source actually names it.
  * Together they're what turns "found something vaguely related" into an honest abstain for a
- * character that doesn't exist (the "Lilita" case).
+ * character that doesn't exist (the "Lilita" and "Cora/Carmilla/Sylph" cases).
  */
 class KnowledgeGrounderTest {
 
     @Test
-    fun `entitySubject extracts the name from bare who-is questions`() {
-        assertEquals("lilita", KnowledgeGrounder.entitySubject("quem é lilita?"))
-        assertEquals("acheron", KnowledgeGrounder.entitySubject("quem e a Acheron")?.lowercase())
-        assertEquals("jing yuan", KnowledgeGrounder.entitySubject("o que é Jing Yuan?")?.lowercase())
-        assertEquals("march 7th", KnowledgeGrounder.entitySubject("who is March 7th")?.lowercase())
+    fun `entitySubjects extracts a single name from a bare who-is question`() {
+        assertEquals(listOf("lilita"), KnowledgeGrounder.entitySubjects("quem é lilita?"))
+        assertEquals(listOf("acheron"), KnowledgeGrounder.entitySubjects("quem e a Acheron").map { it.lowercase() })
+        assertEquals(listOf("jing yuan"), KnowledgeGrounder.entitySubjects("o que é Jing Yuan?").map { it.lowercase() })
+        assertEquals(listOf("march 7th"), KnowledgeGrounder.entitySubjects("who is March 7th").map { it.lowercase() })
     }
 
     @Test
-    fun `entitySubject strips a leading article`() {
-        assertEquals("acheron", KnowledgeGrounder.entitySubject("quem é a acheron"))
-        assertEquals("herta", KnowledgeGrounder.entitySubject("quem é the herta")?.lowercase())
+    fun `entitySubjects extracts every name from a multi-question batch — the reported failure`() {
+        val subjects = KnowledgeGrounder
+            .entitySubjects("quem é cora? quem é luna nova? quem é carmilla? quem é tenebra? quem é sylph?")
+            .map { it.lowercase() }
+        assertEquals(listOf("cora", "luna nova", "carmilla", "tenebra", "sylph"), subjects)
     }
 
     @Test
-    fun `entitySubject returns null for non-entity questions (guard does not apply)`() {
-        // Builds, teams, mechanics — the subject must appear naturally, the roster guard is moot.
-        assertNull(KnowledgeGrounder.entitySubject("qual o melhor cone pro Dan Heng?"))
-        assertNull(KnowledgeGrounder.entitySubject("em quais personagens esse set é melhor?"))
-        assertNull(KnowledgeGrounder.entitySubject("monta um time pra Acheron"))
-        assertNull(KnowledgeGrounder.entitySubject("oi tudo bem"))
+    fun `entitySubjects splits a comma-and-e list under one opener`() {
+        assertEquals(
+            listOf("cora", "carmilla", "sylph"),
+            KnowledgeGrounder.entitySubjects("quem é cora, carmilla e sylph?").map { it.lowercase() },
+        )
+    }
+
+    @Test
+    fun `entitySubjects strips a leading article`() {
+        assertEquals(listOf("acheron"), KnowledgeGrounder.entitySubjects("quem é a acheron"))
+        assertEquals(listOf("herta"), KnowledgeGrounder.entitySubjects("quem é the herta").map { it.lowercase() })
+    }
+
+    @Test
+    fun `entitySubjects is empty for non-entity questions (guard does not apply)`() {
+        assertTrue(KnowledgeGrounder.entitySubjects("qual o melhor cone pro Dan Heng?").isEmpty())
+        assertTrue(KnowledgeGrounder.entitySubjects("em quais personagens esse set é melhor?").isEmpty())
+        assertTrue(KnowledgeGrounder.entitySubjects("monta um time pra Acheron").isEmpty())
+        assertTrue(KnowledgeGrounder.entitySubjects("oi tudo bem").isEmpty())
     }
 
     @Test
     fun `subjectMentioned is true when the source names the subject`() {
         assertTrue(KnowledgeGrounder.subjectMentioned("acheron", "Acheron é do elemento Raio, caminho Nihility."))
-        // Multi-word: any significant token present is enough (sources may abbreviate the name).
+        // Multi-word: every significant token must appear (sources spell the full name).
         assertTrue(KnowledgeGrounder.subjectMentioned("dan heng", "O Dan Heng usa lança de Vento."))
     }
 
     @Test
     fun `subjectMentioned is false when the subject is absent — the invention catch`() {
-        // "Lilita" doesn't exist; whatever the search returned never names her → abstain.
         assertFalse(
             KnowledgeGrounder.subjectMentioned(
                 "lilita",
@@ -57,8 +70,19 @@ class KnowledgeGrounderTest {
     }
 
     @Test
+    fun `subjectMentioned does not match a name as a substring of another word`() {
+        // The exact bug: "cora" must NOT be considered present just because "coração" exists.
+        assertFalse(KnowledgeGrounder.subjectMentioned("cora", "Ela tem um coração puro e gentil."))
+    }
+
+    @Test
+    fun `subjectMentioned requires all tokens, so one common word cannot ground a fake name`() {
+        // "nova" appears in "vida nova" but "luna" does not → not grounded.
+        assertFalse(KnowledgeGrounder.subjectMentioned("luna nova", "Ela traz vida nova ao mundo."))
+    }
+
+    @Test
     fun `subjectMentioned passes when it cannot judge (all-short subject)`() {
-        // No token >= 3 chars to discriminate on → never block on uncertainty.
         assertTrue(KnowledgeGrounder.subjectMentioned("yu", "conteúdo qualquer sem o nome"))
     }
 }
