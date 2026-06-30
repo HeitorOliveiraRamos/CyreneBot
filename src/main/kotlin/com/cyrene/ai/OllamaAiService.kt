@@ -4,6 +4,9 @@ import com.cyrene.config.BotProperties
 import com.cyrene.conversation.ConversationMessage
 import com.cyrene.conversation.MessageRole
 import com.cyrene.discord.tools.DiscordToolContext
+import com.cyrene.discord.util.BotMessages
+import com.cyrene.knowledge.Grounding
+import com.cyrene.knowledge.KnowledgeGrounder
 import org.slf4j.LoggerFactory
 import org.springframework.ai.chat.client.ChatClient
 import org.springframework.ai.chat.messages.Message
@@ -41,6 +44,7 @@ class OllamaAiService(
     private val postProcessor: ResponsePostProcessor,
     private val properties: BotProperties,
     private val metrics: AiMetrics,
+    private val knowledgeGrounder: KnowledgeGrounder,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -75,6 +79,13 @@ class OllamaAiService(
             log.warn("Voice short-circuit produced blank output; falling back to full brain+voice pipeline.")
         }
 
+        // KNOWLEDGE never goes through the tool-calling brain: grounding is enforced in code
+        // (retrieve → abstain-or-retell), so the model can't skip the source or invent when it
+        // comes back empty. The brain+voice path below now serves MODERATION only.
+        if (intent == Intent.KNOWLEDGE) {
+            return runKnowledgePipeline(history, extraSystemPrompt, userName)
+        }
+
         val brainOutput = runBrainPass(history, toolContext, extraSystemPrompt)
         if (log.isDebugEnabled) {
             log.debug("Brain output ({} chars): {}", brainOutput.length, brainOutput.take(500))
@@ -82,6 +93,72 @@ class OllamaAiService(
         return runVoicePass(history, brainOutput, extraSystemPrompt, userName, intent).ifBlank {
             log.warn("Voice pass produced blank output; falling back to brain output.")
             brainOutput
+        }
+    }
+
+    /**
+     * KNOWLEDGE path: ground first, then retell. Retrieval is deterministic ([KnowledgeGrounder]):
+     * local KB, then web, never the model's choice. When nothing real comes back we ABSTAIN with a
+     * fixed in-voice line instead of letting the voice pass narrate an invented kit — this is the
+     * guardrail that makes "Lilita / caminho Eclipse" structurally impossible.
+     *
+     * Speed: the common case (an established character found locally) is a single LLM call — the
+     * voice retelling — strictly fewer than the old brain+voice round-trips. The verifier only runs
+     * on web-sourced answers (local KB is authoritative) and only when
+     * [BotProperties.Knowledge.verifyWebAnswers] is on, so it never taxes the fast local path.
+     */
+    private fun runKnowledgePipeline(
+        history: List<ConversationMessage>,
+        extraSystemPrompt: String?,
+        userName: String?,
+    ): String {
+        val question = history.lastOrNull { it.role == MessageRole.USER }?.content?.trim().orEmpty()
+        val grounding = metrics.timePass("knowledge_retrieve") { knowledgeGrounder.ground(question) }
+
+        if (!grounding.found) {
+            metrics.count("cyrene.knowledge", "result", "abstain")
+            log.debug("Knowledge abstain: no source for '{}'", question)
+            return BotMessages.knowledgeMiss(userName)
+        }
+
+        val answer = runVoicePassKnowledge(history, grounding.context, extraSystemPrompt, userName)
+            .ifBlank { return BotMessages.knowledgeMiss(userName) }
+
+        // Web answers are the embellishment-prone ones (raw page text, less structured than the KB),
+        // so a cheap judge checks the draft against the source. Fail-open on any error: a flaky judge
+        // must never silence a genuinely-grounded reply.
+        if (grounding.source == Grounding.Source.WEB && properties.knowledge.verifyWebAnswers) {
+            if (!isGrounded(answer, grounding.context)) {
+                metrics.count("cyrene.knowledge", "result", "unverified")
+                log.debug("Knowledge verify rejected a web answer for '{}'", question)
+                return BotMessages.knowledgeMiss(userName)
+            }
+            metrics.count("cyrene.knowledge", "result", "verified")
+        } else {
+            metrics.count("cyrene.knowledge", "result", "grounded")
+        }
+        return answer
+    }
+
+    /**
+     * Grounding judge (#5): does every factual claim in [answer] trace back to [context]? Tiny token
+     * budget, temp 0 — it only emits "sim"/"nao". Returns true on any failure (parse error, exception)
+     * so the worst case is a missed catch, never a wrongly-suppressed good answer.
+     */
+    private fun isGrounded(answer: String, context: String): Boolean {
+        val messages = listOf(
+            SystemMessage(VERIFY_INSTRUCTIONS),
+            UserMessage("CONTEXTO:\n$context\n\nRESPOSTA:\n$answer\n\nVeredito:"),
+        )
+        return try {
+            val raw = metrics.timePass("knowledge_verify") {
+                chatModel.call(Prompt(messages, verifyOptions())).result.output.text
+            } ?: ""
+            if (log.isDebugEnabled) log.debug("Grounding verdict raw='{}'", raw.trim())
+            parseVerdict(raw)
+        } catch (e: Exception) {
+            log.warn("Grounding verification failed; passing answer through", e)
+            true
         }
     }
 
@@ -447,6 +524,20 @@ class OllamaAiService(
             .numThread(properties.performance.numThread)
             .build()
 
+    /**
+     * Verifier options: brain model, deterministic, single-word budget. Unlike the intent gate,
+     * numCtx stays at the full window — the judge must read the whole source [context] (up to the
+     * web-fetch budget) alongside the answer to check grounding.
+     */
+    private fun verifyOptions(): OllamaOptions =
+        OllamaOptions.builder()
+            .model(properties.brainModelName)
+            .temperature(0.0)
+            .numCtx(properties.performance.numCtx)
+            .numPredict(8)
+            .numThread(properties.performance.numThread)
+            .build()
+
     private fun legacyOptions(): OllamaOptions =
         OllamaOptions.builder()
             .model(properties.modelName)
@@ -473,6 +564,18 @@ class OllamaAiService(
                 s.startsWith("chat") -> Intent.CHAT
                 else -> Intent.CHAT
             }
+        }
+
+        /**
+         * Maps the grounding judge's raw output to a pass/fail. Returns false ONLY on a clear
+         * negative verdict ("nao"/"não"/"no"); any other or unrecognised output passes. Pure, so
+         * the fail-open contract is unit-testable without a model. The asymmetry is deliberate:
+         * abstaining requires the judge to actively reject, so an ambiguous verdict never silences
+         * an answer the deterministic gate already grounded.
+         */
+        internal fun parseVerdict(raw: String): Boolean {
+            val s = raw.trim().lowercase().trimStart('"', '\'', '`', ' ')
+            return !(s.startsWith("nao") || s.startsWith("não") || s.startsWith("no"))
         }
 
         /** Strips a leading "[name]: " speaker tag that the mention path prepends to turns. */
@@ -547,23 +650,47 @@ class OllamaAiService(
             - uma consulta a dados do Discord: info do servidor, contagem de membros,
               permissões, busca de membro por ID
 
-            Responda "kb" quando a mensagem faz uma pergunta FACTUAL sobre o jogo
-            Honkai: Star Rail (HSR) que precisa de dados precisos:
+            Responda "kb" quando a mensagem faz uma pergunta sobre o jogo
+            Honkai: Star Rail (HSR) que precisa de dados precisos — INCLUSIVE pedidos de
+            recomendação/opinião que dependem de fatos do jogo (build, time, sinergia,
+            "vale a pena", "em quais personagens"):
             - personagens, kits, habilidades, elementos, caminhos (Paths), Eidolons
-            - cones de luz (Light Cones), relíquias, builds, times, status
+            - cones de luz (Light Cones), relíquias, builds, times, status, sinergias
             - lore, história, mecânicas, versão/patch atual, banners, eventos
-            - exemplos: "quem é a Acheron?", "qual o melhor cone pro Dan Heng?",
-              "que elemento é o Jing Yuan?", "quando saiu a versão 3.0?"
+            - recomendações que dependem do jogo: "qual o melhor cone pro Dan Heng?",
+              "em quais personagens esse set é melhor?", "vale a pena puxar a Acheron?",
+              "qual o melhor time pra ela?"
+            - exemplos diretos: "quem é a Acheron?", "que elemento é o Jing Yuan?",
+              "quando saiu a versão 3.0?"
 
             Responda "chat" para QUALQUER outra coisa:
             - saudações ("oi", "olá", "bom dia"), despedidas, agradecimentos
             - perguntas sobre o bot ("qual seu nome?", "você é uma IA?")
-            - elogios, declarações, opiniões, brincadeiras
-            - pedidos de história inventada, conselho, conversa aleatória
-            - opiniões/recomendações genéricas que não dependem de um fato do jogo
+            - elogios, declarações, brincadeiras, papo aleatório
+            - pedidos de história inventada, desabafo, conselho de vida
+            - opiniões que NÃO dependem de fatos do jogo (ex.: "qual sua cor favorita?")
 
-            Na dúvida entre "kb" e "chat" para algo de HSR, prefira "kb".
+            Na dúvida entre "kb" e "chat" para algo de HSR, prefira SEMPRE "kb" — é melhor
+            consultar a base do que arriscar inventar um personagem ou status.
             Não explique. Não comente. Não use pontuação. APENAS "mod", "kb" ou "chat".
+        """.trimIndent()
+
+        /**
+         * Grounding-judge prompt. Forces a single-word verdict on whether the answer is fully
+         * supported by the provided source. Strict by design: anything in the answer that isn't
+         * in the context counts as unsupported, so an embellished/invented stat fails.
+         */
+        val VERIFY_INSTRUCTIONS = """
+            Você é um verificador de fidelidade. Recebe um CONTEXTO (dados de fonte) e uma
+            RESPOSTA. Sua tarefa: decidir se TODA afirmação factual da RESPOSTA (nomes,
+            elementos, caminhos, habilidades, números, efeitos) está sustentada pelo CONTEXTO.
+
+            - Se algo na RESPOSTA NÃO aparece no CONTEXTO (foi inventado ou contradiz a fonte),
+              responda "nao".
+            - Se tudo na RESPOSTA está apoiado no CONTEXTO, responda "sim".
+            - Vocativos, saudações e tom carinhoso NÃO contam como afirmação factual — ignore-os.
+
+            Responda APENAS uma palavra: "sim" ou "nao". Nada mais.
         """.trimIndent()
 
         /** Sentinel returned by the brain when the user's message needs no tool action

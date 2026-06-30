@@ -150,6 +150,14 @@ data class BotProperties(
         val similarityThreshold: Double = 0.55,
         val searxngUrl: String? = null,
         /**
+         * When true, a web-sourced HSR answer is passed through a cheap grounding judge
+         * (LLM verdict "sim/nao" against the fetched page text) before it's sent; an
+         * unsupported answer is replaced by the abstain message. Local-KB answers skip this
+         * (the base is authoritative). Adds one short LLM round-trip per WEB answer only —
+         * turn off if web replies feel slow and you trust the deterministic grounding alone.
+         */
+        val verifyWebAnswers: Boolean = true,
+        /**
          * How many of the top web-search results to open and read in full (download the
          * page, strip it to readable text) instead of trusting only the 1–2 sentence
          * SearXNG snippet. Full page text is what lets the brain reconstruct a complete

@@ -125,9 +125,10 @@ bot:
     # Minimum cosine similarity (0..1) for a chunk to be considered relevant. Below this,
     # lookupHsr reports "nothing found" so the brain can fall back to searchWeb.
     similarity-threshold: ${HSR_SIM_THRESHOLD:0.55}
-    # Optional self-hosted SearXNG JSON endpoint for the web-search fallback, e.g.
-    # http://localhost:8080 . Leave blank to disable web search (lookupHsr still works).
-    searxng-url: ${SEARXNG_URL:}
+    # Self-hosted SearXNG JSON endpoint for the web-search fallback. Set to empty to disable
+    # web search (lookupHsr still works). Web search is half the anti-hallucination net —
+    # when a character isn't in the local base, this is the only thing that grounds the answer.
+    searxng-url: ${SEARXNG_URL:http://localhost:8888}
     # How many of the top web results to open and read in full (page text), not just the
     # short SearXNG snippet — this is what makes leaked/older kits actually answerable.
     # 0 = snippets only. Kept low (2): better to read few pages deeply than many shallowly
@@ -137,6 +138,10 @@ bot:
     # Large on purpose — on game8-style pages the ability multipliers don't appear until
     # ~14–16k chars in, after the table-of-contents/ratings preamble. Lower if num-ctx is small.
     web-fetch-char-limit: ${HSR_WEB_FETCH_CHARS:18000}
+    # Verify web-sourced HSR answers against the fetched page text with a cheap LLM judge
+    # before sending (one short round-trip per web answer; local-KB answers skip it). Set
+    # false to drop the judge if web replies feel slow and you trust deterministic grounding.
+    verify-web-answers: ${HSR_VERIFY_WEB:true}
 
 logging:
   level:

@@ -26,4 +26,15 @@ object BotMessages {
     /** A reply pipeline failed unexpectedly. */
     const val ERROR =
         "Ai, me embolei toda aqui e não consegui responder agora 😔 Tenta de novo daqui a pouco?"
+
+    /**
+     * HSR knowledge question where no real source (local base nor web) backed the answer.
+     * Sent INSTEAD of letting the model invent — abstaining beats a confident wrong kit.
+     * Static (no LLM call) so the abstain path stays fast.
+     */
+    fun knowledgeMiss(name: String?): String {
+        val who = name?.trim()?.takeIf { it.isNotEmpty() }?.let { ", $it" } ?: ""
+        return "Hmm, não achei nada confiável sobre isso na minha base nem na web$who 😔 " +
+            "Pode ser que esse nome não exista ou esteja escrito diferente — me dá mais um detalhe?"
+    }
 }

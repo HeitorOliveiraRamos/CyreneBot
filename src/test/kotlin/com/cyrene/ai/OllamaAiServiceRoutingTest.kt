@@ -46,6 +46,20 @@ class OllamaAiServiceRoutingTest {
     }
 
     @Test
+    fun `parseVerdict fails only on a clear negative, passing everything else (fail-open)`() {
+        // A clear "no" suppresses the answer (abstain)...
+        assertEquals(false, OllamaAiService.parseVerdict("nao"))
+        assertEquals(false, OllamaAiService.parseVerdict("Não."))
+        assertEquals(false, OllamaAiService.parseVerdict("  no  "))
+        assertEquals(false, OllamaAiService.parseVerdict("\"nao\""))
+        // ...everything else passes, so an ambiguous/garbled judge can't silence a grounded reply.
+        assertEquals(true, OllamaAiService.parseVerdict("sim"))
+        assertEquals(true, OllamaAiService.parseVerdict("SIM"))
+        assertEquals(true, OllamaAiService.parseVerdict(""))
+        assertEquals(true, OllamaAiService.parseVerdict("talvez"))
+    }
+
+    @Test
     fun `selectVoicePath sends a real knowledge result to the full-detail KNOWLEDGE path`() {
         assertEquals(
             VoicePath.KNOWLEDGE,
