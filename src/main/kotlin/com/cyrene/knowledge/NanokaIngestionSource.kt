@@ -71,8 +71,14 @@ class NanokaIngestionSource(
 
     // -------------------- version discovery -------------------- //
 
-    /** Pinned version if set, else the one embedded in the home page's `hsr/<version>/` URLs. */
-    private fun resolveVersion(): String? {
+    /**
+     * Pinned version if set, else the one embedded in the home page's `hsr/<version>/` URLs.
+     * Public so [HsrKnowledgeIngestion] can record what it indexed and [KbFreshnessCheck]
+     * can compare it against that record later. When a version is pinned, the freshness
+     * check compares pin vs indexed (catches "changed the pin, forgot to reindex"), not
+     * pin vs live — pinning is an explicit choice to freeze a patch.
+     */
+    fun resolveVersion(): String? {
         properties.knowledge.nanokaVersion?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
         val home = getText(properties.knowledge.nanokaHomeUrl) ?: return null
         return VERSION_IN_URL.find(home)?.groupValues?.get(1)

@@ -2,6 +2,7 @@ package com.cyrene.discord.listener
 
 import com.cyrene.ai.InferenceGate
 import com.cyrene.ai.OllamaAiService
+import com.cyrene.ai.VisionService
 import com.cyrene.config.BotProperties
 import com.cyrene.conversation.ConversationMessage
 import com.cyrene.conversation.ConversationService
@@ -12,6 +13,7 @@ import com.cyrene.discord.ReplyChainResolver
 import com.cyrene.discord.tools.DiscordToolContext
 import com.cyrene.discord.util.BotMessages
 import com.cyrene.discord.util.DiscordMessageSender
+import com.cyrene.discord.util.TypingIndicator
 import net.dv8tion.jda.api.entities.Message
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
@@ -46,6 +48,8 @@ class MentionReplyListener(
     private val properties: BotProperties,
     private val executor: Executor,
     private val inferenceGate: InferenceGate,
+    private val typingIndicator: TypingIndicator,
+    private val visionService: VisionService,
 ) : ListenerAdapter() {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -105,6 +109,10 @@ class MentionReplyListener(
             channelId = event.channel.id,
         )
 
+        // Immediate feedback while the (slow, local) LLM pipeline runs; stopped in the
+        // same completion handler that releases the gate permit.
+        val typing = typingIndicator.start(event.channel)
+
         try {
             CompletableFuture
                 .supplyAsync(
@@ -118,7 +126,15 @@ class MentionReplyListener(
                         // call here because we're already off the gateway thread.
                         val chain = replyChainResolver.resolveChain(event.message, selfUser.id)
                         val currentName = resolved?.effectiveName ?: event.author.effectiveName
-                        val history = buildHistory(chain, referenced, currentName, withoutMention, selfUser.id)
+
+                        // Image attachments become text (build screenshots etc.) so the rest
+                        // of the pipeline stays text-only. Null when vision is disabled or
+                        // fails — the reply then proceeds exactly as before.
+                        val content = VisionService.augmentContent(
+                            withoutMention,
+                            visionService.describeFirstImage(event.message),
+                        )
+                        val history = buildHistory(chain, referenced, currentName, content, selfUser.id)
 
                         ai.chatBrainAndVoice(
                             history = history,
@@ -140,12 +156,14 @@ class MentionReplyListener(
                             sender.replyLong(event.message, reply)
                         }
                     } finally {
+                        typing.close()
                         inferenceGate.release()
                     }
                 }
         } catch (e: Exception) {
             // supplyAsync can reject synchronously if the executor is saturated; release the
             // permit we just took so it isn't leaked.
+            typing.close()
             inferenceGate.release()
             log.error("MentionReplyListener could not submit work", e)
             event.message.reply(BotMessages.ERROR).queue()

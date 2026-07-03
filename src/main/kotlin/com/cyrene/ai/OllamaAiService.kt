@@ -97,6 +97,19 @@ class OllamaAiService(
     }
 
     /**
+     * Direct entry into the KNOWLEDGE pipeline for the `/hsr` slash command. Skips the
+     * intent gate (a /hsr question is HSR by definition, so it can never be misrouted as
+     * chat) and never touches the tool-aware brain — same guarantees as a routed
+     * KNOWLEDGE mention.
+     */
+    fun answerHsrQuestion(question: String, userName: String? = null): String {
+        val history = listOf(
+            ConversationMessage(conversationId = 0L, role = MessageRole.USER, content = question),
+        )
+        return runKnowledgePipeline(history, extraSystemPrompt = null, userName = userName)
+    }
+
+    /**
      * KNOWLEDGE path: ground first, then retell. Retrieval is deterministic ([KnowledgeGrounder]):
      * local KB, then web, never the model's choice. When nothing real comes back we ABSTAIN with a
      * fixed in-voice line instead of letting the voice pass narrate an invented kit — this is the
@@ -113,7 +126,8 @@ class OllamaAiService(
         userName: String?,
     ): String {
         val question = history.lastOrNull { it.role == MessageRole.USER }?.content?.trim().orEmpty()
-        val grounding = metrics.timePass("knowledge_retrieve") { knowledgeGrounder.ground(question) }
+        val searchQuery = condenseFollowUp(history, question)
+        val grounding = metrics.timePass("knowledge_retrieve") { knowledgeGrounder.ground(searchQuery) }
 
         if (!grounding.found) {
             metrics.count("cyrene.knowledge", "result", "abstain")
@@ -138,6 +152,37 @@ class OllamaAiService(
             metrics.count("cyrene.knowledge", "result", "grounded")
         }
         return answer
+    }
+
+    /**
+     * Condense-question step: retrieval sees only ONE query string, so a threaded follow-up
+     * like "e os Eidolons dela?" would reach the vector store with an unresolved pronoun and
+     * miss. When there is prior conversation, one cheap deterministic call rewrites the last
+     * question as standalone; single-turn questions (and /hsr) skip it entirely. Fail-open:
+     * any error, blank or fishy output falls back to the original question — the worst case
+     * is exactly today's behaviour, never a corrupted query.
+     */
+    private fun condenseFollowUp(history: List<ConversationMessage>, question: String): String {
+        if (history.size <= 1 || question.isBlank()) return question
+        val transcript = history.dropLast(1).takeLast(6).joinToString("\n") { m ->
+            val speaker = if (m.role == MessageRole.ASSISTANT) "Cyrene" else "Usuário"
+            "$speaker: ${m.content.take(400)}"
+        }
+        val messages = listOf(
+            SystemMessage(CONDENSE_INSTRUCTIONS),
+            UserMessage("Conversa anterior:\n$transcript\n\nÚltima pergunta: $question\n\nPergunta reescrita:"),
+        )
+        return try {
+            val raw = metrics.timePass("knowledge_condense") {
+                chatModel.call(Prompt(messages, condenseOptions())).result.output.text
+            } ?: ""
+            val rewritten = sanitizeCondensed(raw, question)
+            if (log.isDebugEnabled) log.debug("Condense '{}' → '{}'", question, rewritten)
+            rewritten
+        } catch (e: Exception) {
+            log.warn("Condense step failed; grounding on the raw question", e)
+            question
+        }
     }
 
     /**
@@ -538,6 +583,19 @@ class OllamaAiService(
             .numThread(properties.performance.numThread)
             .build()
 
+    /**
+     * Condense options: brain model, deterministic, small budget — the output is a single
+     * rewritten question, and the input transcript is short (last 6 turns, 400 chars each).
+     */
+    private fun condenseOptions(): OllamaOptions =
+        OllamaOptions.builder()
+            .model(properties.brainModelName)
+            .temperature(0.0)
+            .numCtx(properties.performance.numCtx.coerceAtMost(4096))
+            .numPredict(96)
+            .numThread(properties.performance.numThread)
+            .build()
+
     private fun legacyOptions(): OllamaOptions =
         OllamaOptions.builder()
             .model(properties.modelName)
@@ -577,6 +635,32 @@ class OllamaAiService(
             val s = raw.trim().lowercase().trimStart('"', '\'', '`', ' ')
             return !(s.startsWith("nao") || s.startsWith("não") || s.startsWith("no"))
         }
+
+        /**
+         * Guards the condense step's output before it replaces the grounding query. The model
+         * occasionally answers instead of rewriting, or pads with explanation — both show up
+         * as multi-line or bloated output, so anything blank, multi-line, or much longer than
+         * a question falls back to [fallback] (the original question). Pure, so the fail-open
+         * contract is unit-testable without a model.
+         */
+        internal fun sanitizeCondensed(raw: String, fallback: String): String {
+            val s = raw.trim().trim('"', '\'', '`').trim()
+            if (s.isEmpty() || s.contains('\n') || s.length > 300) return fallback
+            return s
+        }
+
+        /** Condense-question prompt: rewrite the last user turn as a standalone question. */
+        val CONDENSE_INSTRUCTIONS = """
+            Você reescreve perguntas. Dada uma conversa e a última pergunta do usuário,
+            reescreva APENAS a última pergunta como uma pergunta autônoma e completa em
+            PT-BR, resolvendo pronomes e referências ("ela", "dele", "esse cone",
+            "e os Eidolons?") com os nomes citados antes na conversa.
+
+            - NÃO responda a pergunta. A saída é SOMENTE a pergunta reescrita, em uma linha.
+            - Se a pergunta já é autônoma, repita-a exatamente como veio.
+            - Preserve pedidos de profundidade ("kit completo", "pesquisa na internet").
+            - Ignore rótulos como "[nome]:" — eles indicam apenas quem falou.
+        """.trimIndent()
 
         /** Strips a leading "[name]: " speaker tag that the mention path prepends to turns. */
         private val SPEAKER_PREFIX = Regex("^\\[[^\\]]*]:\\s*")
@@ -647,6 +731,8 @@ class OllamaAiService(
             Responda "mod" quando a mensagem pede:
             - uma ação de moderação contra um membro do Discord: mutar/silenciar/calar/
               timeout, desmutar/destirar mute, expulsar/chutar/kick, banir/ban
+            - gerenciar o canal ou cargos: limpar/apagar mensagens do canal (purge/clear),
+              modo lento (slowmode), dar/adicionar cargo, tirar/remover cargo de um membro
             - uma consulta a dados do Discord: info do servidor, contagem de membros,
               permissões, busca de membro por ID
 
@@ -783,6 +869,14 @@ class OllamaAiService(
               → `kickMember` — exige: alvo, motivo
             - banir / bane / ban
               → `banMember` — exige: alvo, motivo, dias-de-mensagens (use 0 se não disserem)
+            - limpar / apagar mensagens do canal / purge / clear
+              → `purgeMessages` — exige: quantidade (1 a 100)
+            - modo lento / slowmode
+              → `setSlowmode` — exige: segundos (0 desativa; máx 21600)
+            - dar / adicionar / colocar cargo
+              → `addRoleToMember` — exige: alvo (ID), nome exato do cargo
+            - tirar / remover / revogar cargo
+              → `removeRoleFromMember` — exige: alvo (ID), nome exato do cargo
             - info do servidor → `getGuildInfo`
 
             ### Sobre quem está falando

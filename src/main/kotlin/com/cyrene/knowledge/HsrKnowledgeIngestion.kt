@@ -46,7 +46,30 @@ class HsrKnowledgeIngestion(
         log.info("Clearing vector_store and embedding {} documents...", docs.size)
         jdbcTemplate.execute("TRUNCATE TABLE vector_store")
         embedInBatches(docs)
+        recordIndexedVersion()
         log.info("HSR reindex complete: {} documents embedded. Restart WITHOUT HSR_REINDEX to run normally.", docs.size)
+    }
+
+    /**
+     * Records which nanoka data version this reindex embedded, so [KbFreshnessCheck] can
+     * warn when a new patch lands. Re-resolves the version (one extra tiny home-page fetch
+     * on a manual, run-once path); a null resolution here is only logged — the embed
+     * already succeeded and must not be rolled back over bookkeeping.
+     */
+    private fun recordIndexedVersion() {
+        val version = nanoka.resolveVersion()
+        if (version == null) {
+            log.warn("Could not re-resolve the nanoka version to record it; freshness checks will nag until the next reindex.")
+            return
+        }
+        jdbcTemplate.update(
+            """
+            INSERT INTO kb_meta (chave, valor, atualizado_em) VALUES ('hsr_versao_indexada', ?, now())
+            ON CONFLICT (chave) DO UPDATE SET valor = EXCLUDED.valor, atualizado_em = now()
+            """.trimIndent(),
+            version,
+        )
+        log.info("Recorded indexed HSR data version {}", version)
     }
 
     private fun embedInBatches(docs: List<Document>) {

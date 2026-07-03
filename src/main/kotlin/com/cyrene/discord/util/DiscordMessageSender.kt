@@ -2,6 +2,7 @@ package com.cyrene.discord.util
 
 import com.cyrene.config.BotProperties
 import net.dv8tion.jda.api.entities.Message
+import net.dv8tion.jda.api.interactions.InteractionHook
 import org.springframework.stereotype.Component
 
 @Component
@@ -31,6 +32,19 @@ class DiscordMessageSender(
         }
         val safe = content.ifBlank { blankFallback }
         split(safe).forEach { original.reply(it).queue(botReplyCache::put) }
+    }
+
+    /**
+     * [replyLong] for deferred slash-command interactions. Sent messages are cached in
+     * [BotReplyCache] so a user replying to an /hsr answer gets reply-chain context.
+     */
+    fun sendLong(hook: InteractionHook, content: String) {
+        if (containsBlockedMention(content)) {
+            hook.sendMessage("Não posso fazer isso").queue()
+            return
+        }
+        val safe = content.ifBlank { blankFallback }
+        split(safe).forEach { hook.sendMessage(it).queue(botReplyCache::put) }
     }
 
     private fun containsBlockedMention(text: String): Boolean =

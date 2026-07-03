@@ -2,6 +2,7 @@ package com.cyrene.discord.listener
 
 import com.cyrene.ai.InferenceGate
 import com.cyrene.ai.OllamaAiService
+import com.cyrene.ai.VisionService
 import com.cyrene.config.BotProperties
 import com.cyrene.conversation.ConversationMessage
 import com.cyrene.conversation.ConversationService
@@ -10,6 +11,7 @@ import com.cyrene.conversation.UsuarioService
 import com.cyrene.discord.tools.DiscordToolContext
 import com.cyrene.discord.util.BotMessages
 import com.cyrene.discord.util.DiscordMessageSender
+import com.cyrene.discord.util.TypingIndicator
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
 import org.slf4j.LoggerFactory
@@ -40,6 +42,8 @@ class ChatSessionListener(
     private val properties: BotProperties,
     private val executor: Executor,
     private val inferenceGate: InferenceGate,
+    private val typingIndicator: TypingIndicator,
+    private val visionService: VisionService,
 ) : ListenerAdapter() {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -59,14 +63,9 @@ class ChatSessionListener(
         val content = message.contentRaw
 
         // History is the prior persisted exchanges; the current user turn is appended
-        // in-memory before the AI call and persisted atomically afterwards along with
-        // the reply.
+        // in-memory before the AI call (inside the async block, where the vision pass can
+        // augment it) and persisted atomically afterwards along with the reply.
         val priorHistory = conversations.history(conversationId)
-        val historyForAi = priorHistory + ConversationMessage(
-            conversationId = conversationId,
-            role = MessageRole.USER,
-            content = content,
-        )
 
         val toolContext = DiscordToolContext(
             callerUserId = userId,
@@ -82,12 +81,28 @@ class ChatSessionListener(
             return
         }
 
+        // Immediate feedback while the (slow, local) LLM pipeline runs; stopped in the
+        // same completion handler that releases the gate permit.
+        val typing = typingIndicator.start(event.channel)
+
         try {
             CompletableFuture
                 .supplyAsync(
                     {
                         val resolved = usuarioService.resolveForEvent(event)
-                        ai.chatBrainAndVoice(
+                        // The augmented turn (text + extracted image content) is what gets
+                        // persisted too, so a follow-up like "e os substatus?" still sees
+                        // the image data in the session history.
+                        val contentForAi = VisionService.augmentContent(
+                            content,
+                            visionService.describeFirstImage(message),
+                        )
+                        val historyForAi = priorHistory + ConversationMessage(
+                            conversationId = conversationId,
+                            role = MessageRole.USER,
+                            content = contentForAi,
+                        )
+                        contentForAi to ai.chatBrainAndVoice(
                             history = historyForAi,
                             toolContext = toolContext,
                             extraSystemPrompt = resolved?.systemPrompt,
@@ -97,23 +112,26 @@ class ChatSessionListener(
                     executor,
                 )
                 // Single completion handler so the gate permit is released exactly once.
-                .whenComplete { reply, ex ->
+                .whenComplete { result, ex ->
                     try {
                         if (ex != null) {
                             log.error("Failed to process chat-session message for conv {}", conversationId, ex)
                             message.reply(BotMessages.ERROR).queue()
                         } else {
-                            val persisted = conversations.recordExchange(conversationId, content, reply)
+                            val (contentForAi, reply) = result
+                            val persisted = conversations.recordExchange(conversationId, contentForAi, reply)
                             if (!persisted) {
                                 log.debug("Skipped recording exchange for conv {} — no longer active", conversationId)
                             }
                             sender.replyLong(message, reply)
                         }
                     } finally {
+                        typing.close()
                         inferenceGate.release()
                     }
                 }
         } catch (e: Exception) {
+            typing.close()
             inferenceGate.release()
             log.error("Failed to submit chat-session work for conv {}", conversationId, e)
             message.reply(BotMessages.ERROR).queue()

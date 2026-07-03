@@ -4,6 +4,9 @@ import net.dv8tion.jda.api.JDA
 import net.dv8tion.jda.api.Permission
 import net.dv8tion.jda.api.entities.Guild
 import net.dv8tion.jda.api.entities.Member
+import net.dv8tion.jda.api.entities.Role
+import net.dv8tion.jda.api.entities.channel.attribute.ISlowmodeChannel
+import net.dv8tion.jda.api.entities.channel.middleman.GuildMessageChannel
 import org.slf4j.LoggerFactory
 import org.springframework.ai.chat.model.ToolContext
 import org.springframework.ai.tool.annotation.Tool
@@ -199,6 +202,86 @@ class DiscordTools(
         mapOf("ok" to true, "action" to "ban", "targetId" to target.id, "deleteDays" to deleteMessageDays)
     }
 
+    @Tool(
+        description = "APAGA as últimas N mensagens do canal ATUAL (limpeza em massa). Use quando o " +
+            "usuário pedir: 'limpa o chat', 'apaga as últimas X mensagens', 'limpa as mensagens', " +
+            "'purge', 'clear'. EXIGE a permissão 'Gerenciar Mensagens' do solicitante e do bot neste " +
+            "canal. Mensagens com mais de 14 dias o Discord não apaga em massa (são puladas ou " +
+            "apagadas uma a uma, mais devagar).",
+    )
+    fun purgeMessages(
+        @ToolParam(description = "Quantas mensagens recentes apagar (1 a 100)")
+        amount: Int,
+        toolContext: ToolContext,
+    ): Map<String, Any?> = executeChannelMod(toolContext, Permission.MESSAGE_MANAGE, "purge") { channel ->
+        if (amount !in 1..100) {
+            return@executeChannelMod mapOf("ok" to false, "error" to "amount must be between 1 and 100")
+        }
+        val messages = channel.history.retrievePast(amount).complete()
+        channel.purgeMessages(messages)
+        mapOf("ok" to true, "action" to "purge", "channelId" to channel.id, "deleted" to messages.size)
+    }
+
+    @Tool(
+        description = "Define o MODO LENTO (slowmode) do canal ATUAL: intervalo mínimo em segundos entre " +
+            "mensagens de cada usuário. Use quando o usuário pedir: 'ativa o modo lento', 'slowmode de X " +
+            "segundos', 'desativa o modo lento' (segundos = 0). EXIGE a permissão 'Gerenciar Canal'.",
+    )
+    fun setSlowmode(
+        @ToolParam(description = "Intervalo em segundos entre mensagens (0 desativa; máximo 21600 = 6h)")
+        seconds: Int,
+        toolContext: ToolContext,
+    ): Map<String, Any?> = executeChannelMod(toolContext, Permission.MANAGE_CHANNEL, "slowmode") { channel ->
+        if (seconds !in 0..ISlowmodeChannel.MAX_SLOWMODE) {
+            return@executeChannelMod mapOf(
+                "ok" to false,
+                "error" to "seconds must be between 0 and ${ISlowmodeChannel.MAX_SLOWMODE}",
+            )
+        }
+        val slowmode = channel as? ISlowmodeChannel
+            ?: return@executeChannelMod mapOf("ok" to false, "error" to "This channel type does not support slowmode.")
+        slowmode.manager.setSlowmode(seconds).complete()
+        mapOf("ok" to true, "action" to "slowmode", "channelId" to channel.id, "seconds" to seconds)
+    }
+
+    @Tool(
+        description = "ADICIONA um cargo (role) a um membro do servidor, pelo NOME EXATO do cargo. " +
+            "Use quando o usuário pedir: 'dá o cargo X pro fulano', 'adiciona o cargo', 'coloca o " +
+            "cargo', 'atribui o cargo'. EXIGE a permissão 'Gerenciar Cargos' do solicitante e do bot, " +
+            "e ambos precisam estar ACIMA do cargo na hierarquia. Alvo por ID numérico.",
+    )
+    fun addRoleToMember(
+        @ToolParam(description = "ID numérico do usuário alvo no Discord")
+        userId: String,
+        @ToolParam(description = "Nome EXATO do cargo (maiúsculas/minúsculas não importam), ex.: 'Membro'")
+        roleName: String,
+        toolContext: ToolContext,
+    ): Map<String, Any?> = executeMod(toolContext, userId, Permission.MANAGE_ROLES, "addRole") { guild, target ->
+        withResolvedRole(toolContext, guild, roleName) { role ->
+            guild.addRoleToMember(target, role).reason("Role added via bot tool call").complete()
+            mapOf("ok" to true, "action" to "addRole", "targetId" to target.id, "role" to role.name)
+        }
+    }
+
+    @Tool(
+        description = "REMOVE um cargo (role) de um membro do servidor, pelo NOME EXATO do cargo. " +
+            "Use quando o usuário pedir: 'tira o cargo X do fulano', 'remove o cargo', 'revoga o " +
+            "cargo'. EXIGE a permissão 'Gerenciar Cargos' do solicitante e do bot, e ambos precisam " +
+            "estar ACIMA do cargo na hierarquia. Alvo por ID numérico.",
+    )
+    fun removeRoleFromMember(
+        @ToolParam(description = "ID numérico do usuário alvo no Discord")
+        userId: String,
+        @ToolParam(description = "Nome EXATO do cargo (maiúsculas/minúsculas não importam), ex.: 'Membro'")
+        roleName: String,
+        toolContext: ToolContext,
+    ): Map<String, Any?> = executeMod(toolContext, userId, Permission.MANAGE_ROLES, "removeRole") { guild, target ->
+        withResolvedRole(toolContext, guild, roleName) { role ->
+            guild.removeRoleFromMember(target, role).reason("Role removed via bot tool call").complete()
+            mapOf("ok" to true, "action" to "removeRole", "targetId" to target.id, "role" to role.name)
+        }
+    }
+
     // -------------------- internals -------------------- //
 
     /**
@@ -277,6 +360,80 @@ class DiscordTools(
         }
     }
 
+    /**
+     * Pre-flight for CHANNEL-scoped moderation (purge, slowmode) — the sibling of
+     * [executeMod] for actions without a member target. Permission checks are
+     * channel-scoped ([Member.hasPermission] with the channel), so per-channel overrides
+     * are honoured in both directions.
+     */
+    private fun executeChannelMod(
+        toolContext: ToolContext,
+        permission: Permission,
+        actionLabel: String,
+        body: (GuildMessageChannel) -> Map<String, Any?>,
+    ): Map<String, Any?> {
+        val ctx = ctx(toolContext)
+        val guild = guildOrError(toolContext) ?: return dmError()
+        val caller = retrieveMember(guild, ctx.callerUserId)
+            ?: return mapOf("ok" to false, "error" to "Caller not found in guild")
+        val channel = guild.getChannelById(GuildMessageChannel::class.java, ctx.channelId)
+            ?: return mapOf("ok" to false, "error" to "Channel ${ctx.channelId} not found in this guild")
+
+        if (!caller.hasPermission(channel, permission)) {
+            log.warn("Tool {} denied: caller {} lacks {} in channel {}", actionLabel, caller.id, permission, channel.id)
+            return mapOf(
+                "ok" to false,
+                "error" to "Caller does not have the '${permission.getName()}' permission in this channel.",
+            )
+        }
+        if (!guild.selfMember.hasPermission(channel, permission)) {
+            return mapOf(
+                "ok" to false,
+                "error" to "Bot lacks the '${permission.getName()}' permission in this channel.",
+            )
+        }
+
+        return try {
+            log.info("AUDIT tool={} caller={} channel={} guild={}", actionLabel, caller.id, channel.id, guild.id)
+            body(channel)
+        } catch (e: Exception) {
+            log.error("Tool {} failed for caller={} channel={} guild={}", actionLabel, caller.id, channel.id, guild.id, e)
+            mapOf("ok" to false, "error" to "Discord API rejected the request: ${e.message}")
+        }
+    }
+
+    /**
+     * Resolves a role by exact (case-insensitive) name and applies the role-specific guards
+     * that [executeMod] can't know about: ambiguous/unknown names are refused (never guess a
+     * role), and BOTH the bot's and the caller's highest role must sit above the target role.
+     * Runs inside an [executeMod] body, so caller permission and member hierarchy are
+     * already verified.
+     */
+    private inline fun withResolvedRole(
+        toolContext: ToolContext,
+        guild: Guild,
+        roleName: String,
+        body: (Role) -> Map<String, Any?>,
+    ): Map<String, Any?> {
+        val matches = guild.getRolesByName(roleName.trim(), true)
+        if (matches.isEmpty()) return mapOf("ok" to false, "error" to "No role named '$roleName' in this server.")
+        if (matches.size > 1) {
+            return mapOf("ok" to false, "error" to "Multiple roles are named '$roleName'; the name is ambiguous.")
+        }
+        val role = matches.first()
+        val caller = retrieveMember(guild, ctx(toolContext).callerUserId)
+            ?: return mapOf("ok" to false, "error" to "Caller not found in guild")
+        val guardError = when {
+            role.isPublicRole -> "Cannot assign or remove @everyone."
+            role.isManaged -> "Role '${role.name}' is managed by an integration and cannot be assigned manually."
+            !guild.selfMember.canInteract(role) -> "Bot's highest role is not above '${role.name}'."
+            !caller.canInteract(role) -> "Caller's highest role is not above '${role.name}'."
+            else -> null
+        }
+        guardError?.let { return mapOf("ok" to false, "error" to it) }
+        return body(role)
+    }
+
     private fun ctx(toolContext: ToolContext): DiscordToolContext {
         val raw = toolContext.context[DiscordToolContext.KEY]
         require(raw is DiscordToolContext) {
@@ -333,6 +490,7 @@ class DiscordTools(
         "moderateMembers" to member.hasPermission(Permission.MODERATE_MEMBERS),
         "manageMessages" to member.hasPermission(Permission.MESSAGE_MANAGE),
         "manageChannel" to member.hasPermission(Permission.MANAGE_CHANNEL),
+        "manageRoles" to member.hasPermission(Permission.MANAGE_ROLES),
         "manageGuild" to member.hasPermission(Permission.MANAGE_SERVER),
     )
 

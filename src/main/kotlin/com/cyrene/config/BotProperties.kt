@@ -25,6 +25,13 @@ data class BotProperties(
      * swapped to a model tuned for prose/persona quality independent of the brain.
      */
     val voiceModelName: String = "llama3.1",
+    /**
+     * Vision-capable Ollama model (e.g. qwen2.5vl, llava, llama3.2-vision) used by
+     * [com.cyrene.ai.VisionService] to extract the content of image attachments as text
+     * before the normal pipeline runs. Blank/unset = vision disabled: images are ignored
+     * and the bot replies to the text only, exactly as before.
+     */
+    val visionModelName: String? = null,
     val reply: Reply = Reply(),
     val message: Message = Message(),
     val context: Context = Context(),
@@ -167,6 +174,17 @@ data class BotProperties(
          * snippets are still returned for ALL results, so source breadth isn't lost.
          */
         val webFetchPages: Int = 2,
+        /**
+         * Mihomo parsed-showcase endpoint for `/build` ({uid} appended). Public API from the
+         * Mar-7th ecosystem; returns the player's showcased characters with full relic stats.
+         */
+        val mihomoUrl: String = "https://api.mihomo.me/sr_info_parsed",
+        /**
+         * StarRailScore weight table (same maintainer ecosystem as mihomo, ids match) used by
+         * the deterministic relic scorer behind `/build`: per-character main-stat weights per
+         * slot, substat weights, and the normalization constant.
+         */
+        val scoreJsonUrl: String = "https://raw.githubusercontent.com/Mar-7th/StarRailScore/master/score.json",
         /**
          * Per-page cap (characters) on the extracted text fed into the prompt, so one
          * sprawling wiki page can't swallow the context window. Deliberately large: on

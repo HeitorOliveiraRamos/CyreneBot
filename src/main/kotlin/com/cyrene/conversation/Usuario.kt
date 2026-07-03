@@ -30,6 +30,10 @@ class Usuario(
     @Column(name = "memoria", columnDefinition = "TEXT")
     var memoria: String? = null,
 
+    /** UID de HSR vinculado via /uid, para o /build buscar a vitrine no mihomo. */
+    @Column(name = "uid_hsr")
+    var uidHsr: String? = null,
+
     @Column(name = "criado_em", nullable = false)
     var criadoEm: OffsetDateTime = OffsetDateTime.now(),
 

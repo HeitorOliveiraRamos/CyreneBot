@@ -27,6 +27,31 @@ object BotMessages {
     const val ERROR =
         "Ai, me embolei toda aqui e não consegui responder agora 😔 Tenta de novo daqui a pouco?"
 
+    /** `/build` without a linked UID. */
+    const val BUILD_NO_UID =
+        "Antes eu preciso saber quem você é no jogo! Vincula seu UID com `/uid uid:<seu UID>` e me chama de novo. 💜"
+
+    /** `/build` where mihomo doesn't know the UID (wrong number or profile hidden). */
+    fun buildUidNotFound(uid: String): String =
+        "Não achei o UID **$uid** — confere se digitou certo e se o seu perfil está público nas " +
+            "configurações do jogo (Privacidade → mostrar detalhes dos personagens)."
+
+    /** `/build` for a character that isn't in the player's showcase. */
+    fun buildNotInShowcase(query: String, available: List<String>): String {
+        val list = available.filter { it.isNotBlank() }
+        val suffix = if (list.isEmpty()) {
+            "Sua vitrine está vazia — adiciona personagens nela dentro do jogo e tenta de novo."
+        } else {
+            "Na sua vitrine eu enxergo: ${list.joinToString(", ")}. Coloca a personagem na vitrine do jogo pra eu poder avaliar."
+        }
+        return "Não encontrei **$query** na sua vitrine 😔 $suffix"
+    }
+
+    /** `/build` for a character the community weight table doesn't cover yet. */
+    fun buildNoWeights(name: String): String =
+        "A **$name** é nova demais — a régua da comunidade ainda não tem pesos pra ela, e eu me " +
+            "recuso a chutar nota 😌 Tenta de novo depois da próxima atualização da tabela."
+
     /**
      * HSR knowledge question where no real source (local base nor web) backed the answer.
      * Sent INSTEAD of letting the model invent — abstaining beats a confident wrong kit.

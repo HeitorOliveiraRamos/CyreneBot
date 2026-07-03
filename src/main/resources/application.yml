@@ -57,6 +57,10 @@ bot:
   # Voice pass: rewrites the brain's output as Cyrene in persona. No tool callbacks
   # are attached to this pass.
   voice-model-name: ${VOICE_MODEL_NAME:llama3.1}
+  # Vision pass: extracts image-attachment content as text before the normal pipeline
+  # (build screenshots, relics, etc.). Needs a vision-capable Ollama model, e.g.
+  # `ollama pull qwen2.5vl` (or llava, llama3.2-vision). Blank = disabled, images ignored.
+  vision-model-name: ${VISION_MODEL_NAME:}
   # Ollama inference tuning. These are applied at every call site by OllamaAiService
   # because per-prompt OllamaOptions replace Spring AI's chat.options defaults.
   # num-ctx default (16384) is sized for the knowledge path's web-fetch budget (see
@@ -138,6 +142,11 @@ bot:
     # Large on purpose — on game8-style pages the ability multipliers don't appear until
     # ~14–16k chars in, after the table-of-contents/ratings preamble. Lower if num-ctx is small.
     web-fetch-char-limit: ${HSR_WEB_FETCH_CHARS:18000}
+    # /build data sources: mihomo parsed showcase API ({uid} appended) and the StarRailScore
+    # community weight table that drives the deterministic relic scorer. Same ecosystem
+    # (Mar-7th), so character ids match between the two.
+    mihomo-url: ${HSR_MIHOMO_URL:https://api.mihomo.me/sr_info_parsed}
+    score-json-url: ${HSR_SCORE_JSON_URL:https://raw.githubusercontent.com/Mar-7th/StarRailScore/master/score.json}
     # Verify web-sourced HSR answers against the fetched page text with a cheap LLM judge
     # before sending (one short round-trip per web answer; local-KB answers skip it). Set
     # false to drop the judge if web replies feel slow and you trust deterministic grounding.

@@ -117,6 +117,25 @@ class OllamaAiServiceRoutingTest {
     }
 
     @Test
+    fun `sanitizeCondensed accepts a clean one-line rewrite, stripping quotes and whitespace`() {
+        assertEquals(
+            "Quais são os Eidolons da Acheron?",
+            OllamaAiService.sanitizeCondensed("  \"Quais são os Eidolons da Acheron?\"  ", "e os dela?"),
+        )
+    }
+
+    @Test
+    fun `sanitizeCondensed falls back to the original question on blank, multi-line or bloated output`() {
+        val original = "e os Eidolons dela?"
+        // Blank → the model produced nothing usable.
+        assertEquals(original, OllamaAiService.sanitizeCondensed("   ", original))
+        // Multi-line → the model answered/explained instead of rewriting.
+        assertEquals(original, OllamaAiService.sanitizeCondensed("Pergunta:\nQuais os Eidolons?", original))
+        // Bloated → almost certainly an answer, not a question.
+        assertEquals(original, OllamaAiService.sanitizeCondensed("x".repeat(301), original))
+    }
+
+    @Test
     fun `fastPathIntent returns null (defer to the LLM gate) for anything non-trivial`() {
         // Crucially, a moderation or HSR request must NEVER be fast-pathed.
         for (msg in listOf(

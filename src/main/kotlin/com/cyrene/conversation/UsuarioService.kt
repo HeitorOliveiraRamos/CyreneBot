@@ -81,6 +81,20 @@ class UsuarioService(
         repository.save(usuario)
     }
 
+    /** O UID de HSR vinculado pelo usuário via /uid, ou null. */
+    @Transactional(readOnly = true)
+    fun uidDe(usuarioId: String): String? =
+        repository.findByUsuarioId(usuarioId)?.uidHsr
+
+    /** Vincula (ou substitui) o UID de HSR do usuário. Cria a linha se ainda não existir. */
+    @Transactional
+    fun salvarUid(usuarioId: String, nome: String, uid: String) {
+        val usuario = upsert(usuarioId, nome)
+        usuario.uidHsr = uid
+        usuario.atualizadoEm = OffsetDateTime.now()
+        repository.save(usuario)
+    }
+
     /** Apaga a memória do usuário (mantém a linha com nome/ids). Idempotente. */
     @Transactional
     fun limparMemoria(usuarioId: String, nome: String) {
@@ -146,6 +160,7 @@ class UsuarioService(
             Permission.MODERATE_MEMBERS to "moderateMembers",
             Permission.MESSAGE_MANAGE to "manageMessages",
             Permission.MANAGE_CHANNEL to "manageChannel",
+            Permission.MANAGE_ROLES to "manageRoles",
             Permission.MANAGE_SERVER to "manageGuild",
         )
     }
