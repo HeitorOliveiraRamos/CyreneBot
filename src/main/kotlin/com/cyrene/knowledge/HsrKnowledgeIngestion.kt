@@ -60,7 +60,9 @@ class HsrKnowledgeIngestion(
             jdbcTemplate.execute("TRUNCATE TABLE vector_store")
             embedInBatches(docs)
             recordIndexedVersion()
-            log.info("HSR reindex complete: {} documents embedded.", docs.size)
+            // Cached answers were produced from the OLD index — drop them all.
+            jdbcTemplate.execute("TRUNCATE TABLE resposta_cache")
+            log.info("HSR reindex complete: {} documents embedded; answer cache cleared.", docs.size)
         } finally {
             running.set(false)
         }

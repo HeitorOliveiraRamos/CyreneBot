@@ -238,13 +238,23 @@ cmd_reindex() {
   HSR_REINDEX=true nohup java -jar "$JAR" >"$rlog" 2>&1 &
   local rpid=$!
   echo "  ${C_DIM}acompanhe: tail -f $rlog${C_0}"
-  if wait_for "reindex" grep -q "HSR reindex complete" "$rlog"; then
-    grep -E "profiles|skill docs|eidolon docs|Skipped|reindex complete" "$rlog" | sed 's/^/  /'
+  # Um reindex leva MINUTOS (fetch do nanoka + embed de ~2k docs) — o wait_for genérico
+  # de 30s matava o processo no meio do load. Espera dedicada: até 30 min, abortando
+  # cedo se o processo morrer sozinho (crash/abort do ingester).
+  local reindex_ok=1
+  for _ in $(seq 1 1800); do
+    grep -q "HSR reindex complete" "$rlog" 2>/dev/null && { reindex_ok=0; break; }
+    kill -0 "$rpid" 2>/dev/null || break
+    sleep 1
+  done
+  if [ "$reindex_ok" = 0 ]; then
+    grep -E "profiles|relic|enemies|light cone|embedded batch .*/|Skipped|reindex complete" "$rlog" | tail -8 | sed 's/^/  /'
     ok "Reindex concluído"
   else err "Reindex não confirmou conclusão; veja $rlog"; fi
   kill "$rpid" 2>/dev/null; for _ in $(seq 1 10); do kill -0 "$rpid" 2>/dev/null || break; sleep 1; done
   kill -9 "$rpid" 2>/dev/null
-  [ "$was_running" = 1 ] && { warn "Bot estava rodando antes — reiniciando"; start_bot; }
+  if [ "$was_running" = 1 ]; then warn "Bot estava rodando antes — reiniciando"; start_bot; fi
+  # (o `[ ... ] &&` antigo fazia a função sair com código 1 quando o bot NÃO estava rodando)
 }
 
 case "${1:-}" in

@@ -6,6 +6,7 @@ import com.cyrene.conversation.MessageRole
 import com.cyrene.discord.tools.DiscordToolContext
 import com.cyrene.discord.util.BotMessages
 import com.cyrene.hsr.HsrCharacterService
+import com.cyrene.knowledge.AnswerCache
 import com.cyrene.knowledge.Grounding
 import com.cyrene.knowledge.KnowledgeGrounder
 import org.slf4j.LoggerFactory
@@ -47,6 +48,7 @@ class OllamaAiService(
     private val metrics: AiMetrics,
     private val knowledgeGrounder: KnowledgeGrounder,
     private val characters: HsrCharacterService,
+    private val answerCache: AnswerCache,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -129,6 +131,16 @@ class OllamaAiService(
     ): String {
         val question = history.lastOrNull { it.role == MessageRole.USER }?.content?.trim().orEmpty()
         val searchQuery = condenseFollowUp(history, question)
+
+        // Answer cache: a repeat question (exact normalized match) skips retrieval, voice
+        // AND verify. Only grounded/verified answers ever get stored, so a hit is as safe
+        // as the pipeline run that produced it.
+        answerCache.get(searchQuery)?.let {
+            metrics.count("cyrene.knowledge", "result", "cache_hit")
+            log.debug("Knowledge cache hit for '{}'", searchQuery)
+            return it
+        }
+
         val grounding = metrics.timePass("knowledge_retrieve") { knowledgeGrounder.ground(searchQuery) }
 
         if (!grounding.found) {
@@ -153,6 +165,7 @@ class OllamaAiService(
         } else {
             metrics.count("cyrene.knowledge", "result", "grounded")
         }
+        answerCache.put(searchQuery, answer, grounding.source, userName)
         return answer
     }
 

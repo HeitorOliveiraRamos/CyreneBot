@@ -35,9 +35,11 @@ spring:
       embedding:
         options:
           model: ${EMBED_MODEL_NAME:nomic-embed-text}
-          # Keep the embed model resident — lookupHsr embeds every knowledge query, and
-          # Ollama's 5m default unload would add a model load to the first query after a lull.
-          keep-alive: ${OLLAMA_KEEP_ALIVE:30m}
+          # NO keep-alive here on purpose: Spring AI 1.0.0 sends the embedding keep_alive as
+          # an ISO-8601 Duration ("PT30M"), which Ollama's Go parser rejects with 400
+          # "invalid duration" — every embed call (reindex AND lookupHsr) would die. The
+          # chat path serializes it as a plain string, so bot.performance.keep-alive is fine.
+          # Cost: the embed model reloads after Ollama's 5m default idle — ~1s, acceptable.
     vectorstore:
       pgvector:
         # Spring AI creates the `vector_store` table + HNSW index on first start.
@@ -127,6 +129,10 @@ bot:
     # indexed, reindex automatically instead of just warning. Load-before-truncate: a broken
     # fetch never wipes a working KB. Disable to go back to warn-only + manual HSR_REINDEX.
     auto-reindex: ${HSR_AUTO_REINDEX:true}
+    # Cache final knowledge answers by normalized question — a repeat /hsr or mention
+    # question answers instantly with zero LLM calls. Cleared on reindex; web-sourced
+    # entries also expire after 24h. Answers carrying the asker's name are never cached.
+    answer-cache: ${HSR_ANSWER_CACHE:true}
     # nanoka.cc data source for the reindex (structured JSON, no scraping). The patch version
     # is auto-discovered from the home page; pin it via HSR_NANOKA_VERSION to freeze a patch.
     nanoka-home-url: ${HSR_NANOKA_HOME:https://hsr.nanoka.cc/}

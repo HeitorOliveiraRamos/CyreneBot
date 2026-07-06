@@ -1,12 +1,14 @@
 package com.cyrene.knowledge
 
 import com.cyrene.config.BotProperties
+import com.cyrene.hsr.HsrCharacterService
 import org.slf4j.LoggerFactory
 import org.springframework.ai.document.Document
 import org.springframework.ai.tool.annotation.Tool
 import org.springframework.ai.tool.annotation.ToolParam
 import org.springframework.ai.vectorstore.SearchRequest
 import org.springframework.ai.vectorstore.VectorStore
+import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Component
 
 /**
@@ -29,6 +31,7 @@ class GameKnowledgeTools(
     private val vectorStore: VectorStore,
     private val webSearch: WebSearchClient,
     private val properties: BotProperties,
+    private val jdbc: JdbcTemplate,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -47,6 +50,18 @@ class GameKnowledgeTools(
     ): Map<String, Any?> {
         val k = properties.knowledge
 
+        // Name-anchored tier: when the query literally names a KB entity (character, light
+        // cone, relic set, enemy — whatever carries metadata->>'name'), fetch that entity's
+        // docs directly. Cosine similarity is weak on proper nouns — exact whole-word name
+        // matching is how "qual o passivo do cone Along the Passing Shore?" retrieves the
+        // right doc even when the embedding ranks it below the threshold.
+        val nameHits: List<Map<String, Any?>> = try {
+            nameAnchoredDocs(query)
+        } catch (e: Exception) {
+            log.warn("lookupHsr name-anchored search failed for '{}': {}", query, e.message)
+            emptyList()
+        }
+
         val request = SearchRequest.builder()
             .query(query)
             .topK(k.topK)
@@ -57,10 +72,22 @@ class GameKnowledgeTools(
             vectorStore.similaritySearch(request) ?: emptyList()
         } catch (e: Exception) {
             log.error("lookupHsr vector search failed for '{}'", query, e)
-            return mapOf("found" to false, "error" to "Knowledge base unavailable: ${e.message}")
+            if (nameHits.isEmpty()) {
+                return mapOf("found" to false, "error" to "Knowledge base unavailable: ${e.message}")
+            }
+            emptyList()
         }
 
-        if (docs.isEmpty()) {
+        // Name hits lead (exact-entity precision), vector hits fill in; dedupe by content.
+        val results = (nameHits + docs.map { doc ->
+            mapOf(
+                "content" to doc.text,
+                "category" to (doc.metadata["category"] ?: "unknown"),
+                "name" to doc.metadata["name"],
+            )
+        }).distinctBy { it["content"] }.take(k.topK + 3)
+
+        if (results.isEmpty()) {
             log.debug("lookupHsr: no local hit for '{}' (threshold {})", query, k.similarityThreshold)
             return mapOf(
                 "found" to false,
@@ -68,18 +95,37 @@ class GameKnowledgeTools(
             )
         }
 
-        log.debug("lookupHsr: {} hits for '{}'", docs.size, query)
+        log.debug("lookupHsr: {} hits for '{}' ({} name-anchored)", results.size, query, nameHits.size)
         return mapOf(
             "found" to true,
             "source" to "local_knowledge_base",
-            "results" to docs.map { doc ->
-                mapOf(
-                    "content" to doc.text,
-                    "category" to (doc.metadata["category"] ?: "unknown"),
-                    "name" to doc.metadata["name"],
-                )
-            },
+            "results" to results,
         )
+    }
+
+    /**
+     * Docs whose metadata name appears whole-word in the query. The DISTINCT name scan is a
+     * sub-ms seq read over ~1k rows — no index or cache needed at this KB size.
+     */
+    private fun nameAnchoredDocs(query: String): List<Map<String, Any?>> {
+        val names = jdbc.queryForList(
+            "SELECT DISTINCT metadata->>'name' FROM vector_store WHERE metadata->>'name' IS NOT NULL",
+            String::class.java,
+        )
+        val matched = matchNames(query, names)
+        if (matched.isEmpty()) return emptyList()
+        val placeholders = matched.joinToString(",") { "?" }
+        return jdbc.queryForList(
+            "SELECT content, metadata->>'category' AS category, metadata->>'name' AS name " +
+                "FROM vector_store WHERE metadata->>'name' IN ($placeholders)",
+            *matched.toTypedArray(),
+        ).map { row ->
+            mapOf<String, Any?>(
+                "content" to row["content"],
+                "category" to (row["category"] ?: "unknown"),
+                "name" to row["name"],
+            )
+        }
     }
 
     @Tool(
@@ -123,5 +169,27 @@ class GameKnowledgeTools(
                 )
             },
         )
+    }
+
+    internal companion object {
+        /**
+         * Entity names present whole-word in the query (accent/case-insensitive), same
+         * matching contract as the character gazetteer: full name, ≥4 normalized chars — no
+         * substring hits, no advice from one common token of a multi-word name. Capped at 4
+         * names so a listy question can't pull half the KB into the context. Pure.
+         */
+        internal fun matchNames(query: String, names: Collection<String?>): List<String> {
+            val q = HsrCharacterService.normalize(query)
+            if (q.isEmpty()) return emptyList()
+            return names.asSequence()
+                .filterNotNull()
+                .distinct()
+                .filter { name ->
+                    val n = HsrCharacterService.normalize(name)
+                    n.length >= 4 && HsrCharacterService.containsWord(q, n)
+                }
+                .take(4)
+                .toList()
+        }
     }
 }

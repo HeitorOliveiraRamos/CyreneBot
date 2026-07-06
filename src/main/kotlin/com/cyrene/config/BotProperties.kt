@@ -164,6 +164,13 @@ data class BotProperties(
          * Set false to go back to warn-only + manual HSR_REINDEX=true runs.
          */
         val autoReindex: Boolean = true,
+        /**
+         * When true, final knowledge answers are cached by normalized question
+         * ([com.cyrene.knowledge.AnswerCache]) and repeat questions skip the whole
+         * retrieve→voice→verify pipeline. Truncated on every reindex; web-sourced entries
+         * also expire after 24h. Disable if replies ever feel stale.
+         */
+        val answerCache: Boolean = true,
         val nanokaHomeUrl: String = "https://hsr.nanoka.cc/",
         val nanokaCdnUrl: String = "https://static.nanoka.cc/hsr",
         val nanokaVersion: String? = null,
