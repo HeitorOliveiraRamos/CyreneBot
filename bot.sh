@@ -123,12 +123,22 @@ start_ollama() {
   done
 }
 
+# compose v2 é plugin (`docker compose`); o binário standalone `docker-compose` só existe
+# em instalações antigas/brew. Usa o que houver.
+compose() {
+  if docker compose version >/dev/null 2>&1; then docker compose "$@"; else docker-compose "$@"; fi
+}
+
 start_searxng() {
   [ -n "${SEARXNG_URL:-}" ] || { warn "SEARXNG_URL vazio — web search desligado (lookupHsr ainda funciona)"; return 0; }
-  if ! command -v colima >/dev/null; then warn "colima ausente — web search indisponível"; return 0; fi
-  if ! colima status 2>&1 | grep -qi running; then step "Subindo colima"; colima start >/dev/null 2>&1; fi
+  # Linux roda docker nativo; colima é só a VM do docker no macOS.
+  if ! docker info >/dev/null 2>&1; then
+    if command -v colima >/dev/null 2>&1; then
+      if ! colima status 2>&1 | grep -qi running; then step "Subindo colima"; colima start >/dev/null 2>&1; fi
+    else warn "docker indisponível (daemon parado e sem colima) — web search desligado"; return 0; fi
+  fi
   if curl -sf "$SEARXNG_URL/" >/dev/null 2>&1; then ok "SearXNG já no ar ($SEARXNG_URL)"
-  else step "Subindo SearXNG"; (cd "$SEARXNG_DIR" && docker-compose up -d >/dev/null 2>&1)
+  else step "Subindo SearXNG"; (cd "$SEARXNG_DIR" && compose up -d >/dev/null 2>&1)
        wait_for "SearXNG" curl -sf "$SEARXNG_URL/" && ok "SearXNG no ar ($SEARXNG_URL)"; fi
 }
 
@@ -204,9 +214,9 @@ cmd_stop() {
   stop_bot
   if [ "${1:-}" = "--all" ]; then
     require_env
-    step "Derrubando SearXNG"; (cd "$SEARXNG_DIR" && docker-compose down >/dev/null 2>&1) && ok "SearXNG parado"
-    warn "colima e Postgres deixados de pé (compartilhados). Pare manualmente se quiser:"
-    echo "    colima stop   |   brew services stop postgresql@14"
+    step "Derrubando SearXNG"; (cd "$SEARXNG_DIR" && compose down >/dev/null 2>&1) && ok "SearXNG parado"
+    warn "colima/docker e Postgres deixados de pé (compartilhados). Pare manualmente se quiser:"
+    echo "    colima stop   |   brew services stop postgresql@14   (Linux: systemctl stop postgresql)"
   fi
 }
 
