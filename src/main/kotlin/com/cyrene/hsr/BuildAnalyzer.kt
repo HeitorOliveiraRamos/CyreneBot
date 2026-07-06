@@ -36,6 +36,8 @@ object BuildAnalyzer {
         val totalScore: Double,
         val totalRank: String,
         val weakest: RelicScore?,
+        /** Prioritized, ready-to-render farm suggestions; empty when the build needs none. */
+        val farmPlan: List<String> = emptyList(),
     )
 
     fun analyze(character: MihomoCharacter, weights: ScoreWeights.CharWeights): BuildReport {
@@ -50,8 +52,61 @@ object BuildAnalyzer {
             totalScore = total,
             totalRank = rank(total),
             weakest = relics.minByOrNull { it.score },
+            farmPlan = farmPlan(relics, missing, weights),
         )
     }
+
+    /**
+     * Concrete "what to farm next" list, most impactful first: empty slots, then pieces
+     * whose fix is cheapest-per-gain (wrong main → replace; underleveled → just level it;
+     * sub-par score → refarm chasing the right substats). At most [limit] lines; empty when
+     * every piece is A-grade or better — nothing worth telling the player to grind.
+     */
+    internal fun farmPlan(
+        relics: List<RelicScore>,
+        missingSlots: List<Int>,
+        weights: ScoreWeights.CharWeights,
+        limit: Int = 3,
+    ): List<String> {
+        // Sort key = current score, so the worst deficiency leads; empty slots score -1.
+        val plan = mutableListOf<Pair<Double, String>>()
+        missingSlots.forEach { slot ->
+            plan += -1.0 to "**${SLOT_NAMES[slot]}** vazio — equipar qualquer peça decente aqui é o maior ganho."
+        }
+        relics.forEach { r ->
+            val slotName = SLOT_NAMES[r.slot] ?: "Peça ${r.slot}"
+            when {
+                // Slots 1-2 have fixed mains; only 3-6 can have a wrong one. Requires the
+                // ruler to actually know this slot's ideal mains — no "troque por —" advice.
+                r.slot >= 3 && r.mainWeight == 0.0 && weights.main[r.slot].orEmpty().any { it.value > 0 } ->
+                    plan += r.score to
+                        "**$slotName**: main atual (${r.mainName}) não serve — troque por ${idealMains(r.slot, weights)}."
+                r.level < 15 ->
+                    plan += r.score to "**$slotName**: subir de +${r.level} para +15 já melhora a nota."
+                r.score < 7.0 ->
+                    plan += r.score to
+                        "**$slotName** (${fmt(r.score)}): refarm atrás de ${desiredSubs(weights)} nos substats."
+            }
+        }
+        return plan.sortedBy { it.first }.take(limit).map { it.second }
+    }
+
+    /** Best main stats for [slot] under these weights, heaviest first, PT-BR labels. */
+    private fun idealMains(slot: Int, weights: ScoreWeights.CharWeights): String =
+        weights.main[slot].orEmpty().entries
+            .filter { it.value > 0 }
+            .sortedByDescending { it.value }
+            .take(3)
+            .joinToString("/") { statPt(it.key) }
+            .ifEmpty { "—" }
+
+    /** The character's most-wanted substats under these weights, heaviest first. */
+    private fun desiredSubs(weights: ScoreWeights.CharWeights): String =
+        weights.weight.entries
+            .filter { it.value > 0 }
+            .sortedByDescending { it.value }
+            .take(4)
+            .joinToString(" > ") { statPt(it.key) }
 
     internal fun scoreRelic(relic: MihomoRelic, weights: ScoreWeights.CharWeights): RelicScore {
         val mainWeight = relic.mainAffix?.let { weights.main[relic.slot]?.get(it.type) } ?: 0.0
@@ -97,8 +152,91 @@ object BuildAnalyzer {
         4 to "Pés", 5 to "Esfera Planar", 6 to "Corda de Conexão",
     )
 
+    /**
+     * Converts fribbels' harvested weights into the [ScoreWeights.CharWeights] shape so the
+     * same formula scores characters StarRailScore doesn't know yet. Mains: recommended
+     * stats weigh 1.0 (slots 1–2 fixed). Max: theoretical-best relic under these weights —
+     * all 9 max-quality rolls into the top substats.
+     */
+    // ponytail: 1.2*(6*w1+w2+w3+w4) normalization lands within ~5% of StarRailScore's own
+    // max (slightly strict); replicate their generator if the drift ever matters.
+    internal fun fribbelsWeights(meta: FribbelsMeta): ScoreWeights.CharWeights? {
+        val top = meta.subWeights.values.sortedDescending().take(4)
+        val w1 = top.firstOrNull()?.takeIf { it > 0 } ?: return null
+        return ScoreWeights.CharWeights(
+            main = buildMap {
+                put(1, mapOf("HPDelta" to 1.0))
+                put(2, mapOf("AttackDelta" to 1.0))
+                meta.mainStats.forEach { (slot, props) -> put(slot, props.associateWith { 1.0 }) }
+            },
+            weight = meta.subWeights,
+            max = 1.2 * (6 * w1 + top.drop(1).sum()),
+        )
+    }
+
+    /** Game property key → short PT-BR stat label for the recommendation lines. */
+    private val PROP_PT = mapOf(
+        "HPDelta" to "PV", "AttackDelta" to "ATQ", "DefenceDelta" to "DEF",
+        "HPAddedRatio" to "PV%", "AttackAddedRatio" to "ATQ%", "DefenceAddedRatio" to "DEF%",
+        "SpeedDelta" to "Velocidade", "CriticalChanceBase" to "Chance Crít.",
+        "CriticalDamageBase" to "Dano Crít.", "StatusProbabilityBase" to "Acerto de Efeito",
+        "StatusResistanceBase" to "RES de Efeito", "BreakDamageAddedRatioBase" to "Efeito de Quebra",
+        "SPRatioBase" to "Regen. de Energia", "HealRatioBase" to "Aumento de Cura",
+        "PhysicalAddedRatio" to "Dano Físico", "FireAddedRatio" to "Dano de Fogo",
+        "IceAddedRatio" to "Dano de Gelo", "ThunderAddedRatio" to "Dano de Raio",
+        "WindAddedRatio" to "Dano de Vento", "QuantumAddedRatio" to "Dano Quântico",
+        "ImaginaryAddedRatio" to "Dano Imaginário",
+    )
+
+    private fun statPt(prop: String): String = PROP_PT[prop] ?: prop
+
+    /**
+     * The fribbels-sourced recommendation block: sets, ideal mains (✓ when the equipped
+     * piece already matches) and substat priority. Purely presentational — nothing here
+     * feeds the score.
+     */
+    internal fun renderRecommendations(character: MihomoCharacter, meta: FribbelsMeta): String = buildString {
+        appendLine("**Recomendado (fribbels/hsr-optimizer):**")
+        val equippedPieces = character.relicSets.associate { HsrCharacterService.normalize(it.name) to it.pieces }
+        if (meta.relicSets.isNotEmpty()) {
+            val options = meta.relicSets.map { pair ->
+                val (a, b) = pair[0] to pair.getOrElse(1) { pair[0] }
+                val label = if (a == b) "4pç $a" else "2pç $a + 2pç $b"
+                val worn = if (a == b) (equippedPieces[HsrCharacterService.normalize(a)] ?: 0) >= 4
+                else pair.all { (equippedPieces[HsrCharacterService.normalize(it)] ?: 0) >= 2 }
+                if (worn) "$label ✓" else label
+            }
+            appendLine("• Conjuntos: ${options.joinToString(" | ")}")
+        }
+        if (meta.ornamentSets.isNotEmpty()) {
+            val options = meta.ornamentSets.map { set ->
+                if ((equippedPieces[HsrCharacterService.normalize(set)] ?: 0) >= 2) "$set ✓" else set
+            }
+            appendLine("• Ornamentos: ${options.joinToString(" | ")}")
+        }
+        val equippedMains = character.relics.associate { it.slot to it.mainAffix?.type }
+        val mains = meta.mainStats.toSortedMap().mapNotNull { (slot, props) ->
+            if (slot < 3 || props.isEmpty()) return@mapNotNull null
+            val mark = when {
+                equippedMains[slot] in props -> " ✓"
+                equippedMains[slot] != null -> " ✗"
+                else -> ""
+            }
+            "${SLOT_NAMES[slot]}: ${props.joinToString("/") { statPt(it) }}$mark"
+        }
+        if (mains.isNotEmpty()) appendLine("• Main stats: ${mains.joinToString(" • ")}")
+        if (meta.substatPriority.isNotEmpty()) {
+            appendLine("• Substats: ${meta.substatPriority.joinToString(" > ") { statPt(it) }}")
+        }
+    }.trim()
+
     /** Renders the report as Discord markdown, PT-BR, all numbers straight from the math above. */
-    fun render(character: MihomoCharacter, report: BuildReport): String = buildString {
+    fun render(
+        character: MihomoCharacter,
+        report: BuildReport,
+        meta: FribbelsMeta? = null,
+        ruler: String = "StarRailScore",
+    ): String = buildString {
         append("**${character.name}** — Nv. ${character.level} • E${character.eidolon}")
         if (character.elementName.isNotBlank()) append(" • ${character.elementName}")
         if (character.pathName.isNotBlank()) append(" • ${character.pathName}")
@@ -120,13 +258,25 @@ object BuildAnalyzer {
             appendLine()
         }
         report.missingSlots.forEach { appendLine("• **${SLOT_NAMES[it]}** — vazio!") }
-        report.weakest?.let {
+        if (report.farmPlan.isNotEmpty()) {
             appendLine()
-            appendLine(
-                "Peça mais fraca: **${SLOT_NAMES[it.slot]}** (${fmt(it.score)}) — é aqui que um farm rende mais.",
-            )
+            appendLine("**Próximo farm:**")
+            report.farmPlan.forEach { appendLine("• $it") }
+        } else {
+            // Nothing worth grinding — still point at the weakest piece for the min-maxers.
+            report.weakest?.let {
+                appendLine()
+                appendLine(
+                    "Peça mais fraca: **${SLOT_NAMES[it.slot]}** (${fmt(it.score)}) — é aqui que um farm rende mais.",
+                )
+            }
         }
-        append("_Nota pela régua da comunidade (StarRailScore)._")
+        meta?.let {
+            appendLine()
+            appendLine(renderRecommendations(character, it))
+            appendLine()
+        }
+        append("_Nota pela régua da comunidade ($ruler)._")
     }.trim()
 
     private fun fmt(score: Double): String = String.format("%.1f", score)

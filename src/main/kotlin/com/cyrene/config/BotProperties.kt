@@ -106,6 +106,13 @@ data class BotProperties(
         val numPredict: Int = 512,
         val numThread: Int = 8,
         /**
+         * Ollama `keep_alive`: how long the model stays loaded after a call. Ollama's
+         * default (5m) unloads the weights after a quiet spell, so the next mention pays
+         * a full model load before the first token. Applied at every call site (like the
+         * other knobs, per-prompt options replace the yaml defaults). "-1m" = keep forever.
+         */
+        val keepAlive: String = "30m",
+        /**
          * Max number of mention/session replies that may run their LLM pipeline at once,
          * enforced by [com.cyrene.ai.InferenceGate]. A single local Ollama serializes
          * requests internally, so without a bound a burst of mentions piles up on the
@@ -149,6 +156,14 @@ data class BotProperties(
      */
     data class Knowledge(
         val reindex: Boolean = false,
+        /**
+         * When true, the daily [com.cyrene.knowledge.KbFreshnessCheck] doesn't just WARN on
+         * a version mismatch — it triggers a full reindex right there (load-then-truncate,
+         * so a broken source never wipes a working KB). During the re-embed (a few minutes)
+         * local lookups may return partial results; the abstain/web paths cover the gap.
+         * Set false to go back to warn-only + manual HSR_REINDEX=true runs.
+         */
+        val autoReindex: Boolean = true,
         val nanokaHomeUrl: String = "https://hsr.nanoka.cc/",
         val nanokaCdnUrl: String = "https://static.nanoka.cc/hsr",
         val nanokaVersion: String? = null,
@@ -185,6 +200,15 @@ data class BotProperties(
          * slot, substat weights, and the normalization constant.
          */
         val scoreJsonUrl: String = "https://raw.githubusercontent.com/Mar-7th/StarRailScore/master/score.json",
+        /**
+         * Sources for the `hsr_character` cache (names in en/pt/es + fribbels build
+         * metadata), harvested by [com.cyrene.hsr.FribbelsHarvester] on a ~30-day cycle:
+         * StarRailRes index (same ids as mihomo), the fribbels/hsr-optimizer git tree
+         * listing (GitHub API, 1 call per harvest) and its raw-file base.
+         */
+        val starRailResBase: String = "https://raw.githubusercontent.com/Mar-7th/StarRailRes/master/index_min/",
+        val fribbelsTreeUrl: String = "https://api.github.com/repos/fribbels/hsr-optimizer/git/trees/main?recursive=1",
+        val fribbelsRawBase: String = "https://raw.githubusercontent.com/fribbels/hsr-optimizer/main/",
         /**
          * Per-page cap (characters) on the extracted text fed into the prompt, so one
          * sprawling wiki page can't swallow the context window. Deliberately large: on

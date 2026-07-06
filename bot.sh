@@ -44,9 +44,20 @@ require_env() {
 }
 
 resolve_java() {
-  JAVA_HOME="$(/usr/libexec/java_home -v 21 2>/dev/null)" || {
-    err "JDK 21 não encontrado (Kotlin 2.1.0 exige). Instale: brew install --cask corretto@21"; exit 1; }
-  export JAVA_HOME
+  local jh
+  if jh="$(/usr/libexec/java_home -v 21 2>/dev/null)"; then          # macOS
+    export JAVA_HOME="$jh"
+  elif [ -n "${JAVA_HOME:-}" ] && "$JAVA_HOME/bin/java" -version 2>&1 | grep -q 'version "21'; then
+    export JAVA_HOME                                                 # JAVA_HOME já aponta pro 21
+  elif command -v java >/dev/null 2>&1 && java -version 2>&1 | grep -q 'version "21'; then
+    # java 21 no PATH — deriva JAVA_HOME dele (sobrescreve um JAVA_HOME antigo que o mvn usaria)
+    export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")"
+  else
+    err "JDK 21 não encontrado (Kotlin 2.1.0 exige)."
+    echo "  macOS: brew install --cask corretto@21" >&2
+    echo "  Linux: apt install openjdk-21-jdk (ou equivalente) e/ou aponte JAVA_HOME pra ele" >&2
+    exit 1
+  fi
 }
 
 wait_for() { # wait_for <desc> <cmd...>  — tenta por ~30s
@@ -56,10 +67,49 @@ wait_for() { # wait_for <desc> <cmd...>  — tenta por ~30s
 }
 
 # ---- infra ----
+# Data dir do Postgres (onde vive o postmaster.pid) — portável mac/linux.
+# Ordem: $PGDATA explícito > homebrew > caminhos comuns de distro Linux.
+pg_data_dir() {
+  [ -n "${PGDATA:-}" ] && { echo "$PGDATA"; return; }
+  if command -v brew >/dev/null 2>&1; then
+    local d="$(brew --prefix)/var/postgresql@14"; [ -d "$d" ] && { echo "$d"; return; }
+  fi
+  local d; for d in /var/lib/postgresql/*/main /usr/local/var/postgresql@14 /var/lib/pgsql/data; do
+    [ -f "$d/PG_VERSION" ] && { echo "$d"; return; }
+  done
+}
+
+# Postgres que morre sem limpar deixa um postmaster.pid órfão; o SO pode ter reciclado
+# aquele PID pra outro processo → o postgres se recusa a subir ("lock file already exists").
+# Remove o pid se ele não aponta mais pra um postgres vivo.
+# ponytail: só cobre postgres local (dev/homebrew) — num postgres de sistema o data dir é
+# de outro dono e o systemd já limpa sozinho.
+clear_stale_pid() {
+  local dir pidfile pid
+  dir="$(pg_data_dir)"; [ -n "$dir" ] || return 0
+  pidfile="$dir/postmaster.pid"; [ -f "$pidfile" ] || return 0
+  pid="$(head -1 "$pidfile" 2>/dev/null)"
+  if kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o comm= 2>/dev/null | grep -qiE 'postgres|postmaster'; then
+    return 0   # PID é um postgres vivo de verdade — não mexe
+  fi
+  warn "postmaster.pid órfão em $dir (PID $pid não é postgres) — removendo"
+  rm -f "$pidfile"
+}
+
 start_postgres() {
-  if pg_isready -h localhost -q 2>/dev/null; then ok "Postgres já no ar"
-  else step "Subindo Postgres (postgresql@14)"; brew services start postgresql@14 >/dev/null 2>&1
-       wait_for "Postgres" pg_isready -h localhost -q && ok "Postgres no ar"; fi
+  if pg_isready -h localhost -q 2>/dev/null; then ok "Postgres já no ar"; return; fi
+  clear_stale_pid
+  step "Subindo Postgres"
+  if command -v brew >/dev/null 2>&1 && brew list postgresql@14 >/dev/null 2>&1; then
+    brew services start postgresql@14 >/dev/null 2>&1
+  elif command -v pg_ctl >/dev/null 2>&1 && [ -n "$(pg_data_dir)" ]; then
+    pg_ctl -D "$(pg_data_dir)" -l "$LOG_DIR/postgres.log" start >/dev/null 2>&1
+  elif command -v systemctl >/dev/null 2>&1; then
+    sudo systemctl start postgresql >/dev/null 2>&1 || systemctl start postgresql >/dev/null 2>&1
+  else
+    warn "não sei subir o Postgres neste ambiente — inicie manualmente e rode de novo"; return 0
+  fi
+  wait_for "Postgres" pg_isready -h localhost -q && ok "Postgres no ar"
 }
 
 start_ollama() {

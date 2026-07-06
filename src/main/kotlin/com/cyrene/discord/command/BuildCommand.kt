@@ -4,6 +4,7 @@ import com.cyrene.conversation.UsuarioService
 import com.cyrene.discord.util.BotMessages
 import com.cyrene.discord.util.DiscordMessageSender
 import com.cyrene.hsr.BuildAnalyzer
+import com.cyrene.hsr.HsrCharacterService
 import com.cyrene.hsr.MihomoCharacter
 import com.cyrene.hsr.MihomoClient
 import com.cyrene.hsr.MihomoResult
@@ -14,7 +15,6 @@ import net.dv8tion.jda.api.interactions.commands.build.CommandData
 import net.dv8tion.jda.api.interactions.commands.build.Commands
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
-import java.text.Normalizer
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
@@ -29,6 +29,7 @@ class BuildCommand(
     private val usuarioService: UsuarioService,
     private val mihomo: MihomoClient,
     private val scoreWeights: ScoreWeights,
+    private val hsrCharacters: HsrCharacterService,
     private val sender: DiscordMessageSender,
     private val executor: Executor,
 ) : SlashCommand {
@@ -73,20 +74,25 @@ class BuildCommand(
             MihomoResult.NotFound -> return BotMessages.buildUidNotFound(uid)
             MihomoResult.Error -> return BotMessages.ERROR
         }
+        // Showcase names come localized from mihomo (pt); the id fallback lets a user type
+        // the English/Spanish name ("firefly") and still land on the right showcased character.
         val character = matchCharacter(query, profile.characters)
+            ?: hsrCharacters.resolveId(query)?.let { id -> profile.characters.firstOrNull { it.id == id } }
             ?: return BotMessages.buildNotInShowcase(query, profile.characters.map { it.name })
-        val weights = scoreWeights.forCharacter(character.id)
+        val meta = hsrCharacters.fribbelsMeta(character.id)
+        // StarRailScore is the primary ruler; fribbels weights cover characters it lags on.
+        val srsWeights = scoreWeights.forCharacter(character.id)
+        val weights = srsWeights
+            ?: meta?.let { BuildAnalyzer.fribbelsWeights(it) }
             ?: return BotMessages.buildNoWeights(character.name)
-        return BuildAnalyzer.render(character, BuildAnalyzer.analyze(character, weights))
+        val ruler = if (srsWeights != null) "StarRailScore" else "fribbels/hsr-optimizer"
+        return BuildAnalyzer.render(character, BuildAnalyzer.analyze(character, weights), meta, ruler)
     }
 
     internal companion object {
 
-        private val DIACRITICS = Regex("\\p{M}+")
-
-        /** Accent/case-insensitive form so "marco" finds "Março 7" and "acheron" finds "Acheron". */
-        internal fun normalize(s: String): String =
-            DIACRITICS.replace(Normalizer.normalize(s.trim().lowercase(), Normalizer.Form.NFKD), "")
+        /** Accent/case-insensitive matching, shared with the hsr_character name resolver. */
+        internal fun normalize(s: String): String = HsrCharacterService.normalize(s)
 
         /**
          * Picks the showcased character the user meant: exact normalized match first, then a

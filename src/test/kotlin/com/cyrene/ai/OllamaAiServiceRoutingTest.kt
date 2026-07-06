@@ -36,6 +36,16 @@ class OllamaAiServiceRoutingTest {
     }
 
     @Test
+    fun `parseIntent reads the JSON form produced under format=json`() {
+        assertEquals(Intent.MODERATION, OllamaAiService.parseIntent("""{"intent": "mod"}"""))
+        assertEquals(Intent.KNOWLEDGE, OllamaAiService.parseIntent("""{"intent":"kb"}"""))
+        assertEquals(Intent.CHAT, OllamaAiService.parseIntent("""{"intent": "chat"}"""))
+        // Malformed / truncated JSON degrades to the bare-word fallback → safe CHAT default.
+        assertEquals(Intent.CHAT, OllamaAiService.parseIntent("""{"intent": "mo"""))
+        assertEquals(Intent.CHAT, OllamaAiService.parseIntent("""{"outro_campo": "mod"}"""))
+    }
+
+    @Test
     fun `parseIntent defaults blank or unrecognised output to CHAT (the safe fallback)`() {
         // CHAT can never misfire a moderation tool, so anything ambiguous must land here.
         assertEquals(Intent.CHAT, OllamaAiService.parseIntent(""))
@@ -57,6 +67,16 @@ class OllamaAiServiceRoutingTest {
         assertEquals(true, OllamaAiService.parseVerdict("SIM"))
         assertEquals(true, OllamaAiService.parseVerdict(""))
         assertEquals(true, OllamaAiService.parseVerdict("talvez"))
+    }
+
+    @Test
+    fun `parseVerdict reads the JSON form produced under format=json`() {
+        assertEquals(false, OllamaAiService.parseVerdict("""{"veredito": "nao"}"""))
+        assertEquals(false, OllamaAiService.parseVerdict("""{"veredito":"não"}"""))
+        assertEquals(true, OllamaAiService.parseVerdict("""{"veredito": "sim"}"""))
+        // Malformed JSON or a missing field falls back on the raw text → fail-open (pass).
+        assertEquals(true, OllamaAiService.parseVerdict("""{"veredito": "na"""))
+        assertEquals(true, OllamaAiService.parseVerdict("""{"outro": "nao"}"""))
     }
 
     @Test
@@ -122,6 +142,43 @@ class OllamaAiServiceRoutingTest {
             "Quais são os Eidolons da Acheron?",
             OllamaAiService.sanitizeCondensed("  \"Quais são os Eidolons da Acheron?\"  ", "e os dela?"),
         )
+    }
+
+    @Test
+    fun `gazetteerFastPath routes a question-shaped character mention to KNOWLEDGE`() {
+        val knowsAcheron = { s: String -> s.contains("acheron", ignoreCase = true) }
+        assertEquals(Intent.KNOWLEDGE, OllamaAiService.gazetteerFastPath("quem é a Acheron?", knowsAcheron))
+        assertEquals(Intent.KNOWLEDGE, OllamaAiService.gazetteerFastPath("me fala o kit da acheron", knowsAcheron))
+        assertEquals(Intent.KNOWLEDGE, OllamaAiService.gazetteerFastPath("[Heitor]: qual o elemento da Acheron", knowsAcheron))
+    }
+
+    @Test
+    fun `gazetteerFastPath defers to the LLM gate on any moderation cue`() {
+        val knowsAcheron = { s: String -> s.contains("acheron", ignoreCase = true) }
+        // Mod verb present → null, even with a character name and a question mark.
+        assertEquals(null, OllamaAiService.gazetteerFastPath("muta quem falou mal da acheron?", knowsAcheron))
+        // A <@mention> smells like a target, not a kb question.
+        assertEquals(null, OllamaAiService.gazetteerFastPath("<@123> perguntou da acheron?", knowsAcheron))
+        assertEquals(null, OllamaAiService.gazetteerFastPath("da o cargo acheron pro pessoal?", knowsAcheron))
+    }
+
+    @Test
+    fun `gazetteerFastPath defers when the mention is not question-shaped or names nobody`() {
+        val knowsAcheron = { s: String -> s.contains("acheron", ignoreCase = true) }
+        // Casual chat naming a character must NOT fast-path (no '?' and no knowledge cue).
+        assertEquals(null, OllamaAiService.gazetteerFastPath("a acheron é linda demais", knowsAcheron))
+        // Question-shaped but no known character → LLM gate decides.
+        assertEquals(null, OllamaAiService.gazetteerFastPath("qual seu nome?", { false }))
+    }
+
+    @Test
+    fun `sanitizeCondensed reads the JSON form produced under format=json`() {
+        assertEquals(
+            "Quais são os Eidolons da Acheron?",
+            OllamaAiService.sanitizeCondensed("""{"pergunta": "Quais são os Eidolons da Acheron?"}""", "e os dela?"),
+        )
+        // Truncated JSON falls back on the raw text, which fails the one-line checks → original question.
+        assertEquals("e os dela?", OllamaAiService.sanitizeCondensed("""{"pergunta": "Quais""", "e os dela?"))
     }
 
     @Test

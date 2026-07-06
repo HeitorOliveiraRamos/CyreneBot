@@ -5,6 +5,7 @@ import com.cyrene.conversation.ConversationMessage
 import com.cyrene.conversation.MessageRole
 import com.cyrene.discord.tools.DiscordToolContext
 import com.cyrene.discord.util.BotMessages
+import com.cyrene.hsr.HsrCharacterService
 import com.cyrene.knowledge.Grounding
 import com.cyrene.knowledge.KnowledgeGrounder
 import org.slf4j.LoggerFactory
@@ -45,6 +46,7 @@ class OllamaAiService(
     private val properties: BotProperties,
     private val metrics: AiMetrics,
     private val knowledgeGrounder: KnowledgeGrounder,
+    private val characters: HsrCharacterService,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -225,6 +227,17 @@ class OllamaAiService(
         fastPathIntent(lastUser)?.let {
             metrics.count("cyrene.llm.fastpath", "result", "hit")
             if (log.isDebugEnabled) log.debug("Intent fast-path (no LLM) → {}", it)
+            return it
+        }
+
+        // Gazetteer fast-path: a question-shaped message naming a known HSR character (any
+        // language, from the hsr_character cache) with no moderation cue routes straight to
+        // KNOWLEDGE — the single most common non-chat mention, now LLM-free. KNOWLEDGE is
+        // tool-less (deterministic grounding), so a false hit can never moderate anyone;
+        // any moderation cue defers to the LLM gate instead.
+        gazetteerFastPath(lastUser) { characters.findInText(it).isNotEmpty() }?.let {
+            metrics.count("cyrene.llm.fastpath", "result", "gazetteer")
+            if (log.isDebugEnabled) log.debug("Gazetteer fast-path (no LLM) → {}", it)
             return it
         }
         metrics.count("cyrene.llm.fastpath", "result", "miss")
@@ -534,6 +547,7 @@ class OllamaAiService(
             // moderation replies still stop after a sentence, so this never slows them down.
             .numPredict(properties.performance.knowledgeNumPredict)
             .numThread(properties.performance.numThread)
+            .keepAlive(properties.performance.keepAlive)
             .build()
 
     private fun voiceOptions(): OllamaOptions =
@@ -543,6 +557,7 @@ class OllamaAiService(
             .numCtx(properties.performance.numCtx)
             .numPredict(properties.performance.numPredict)
             .numThread(properties.performance.numThread)
+            .keepAlive(properties.performance.keepAlive)
             .build()
 
     /**
@@ -558,42 +573,58 @@ class OllamaAiService(
             .numCtx(properties.performance.numCtx)
             .numPredict(properties.performance.knowledgeNumPredict)
             .numThread(properties.performance.numThread)
+            .keepAlive(properties.performance.keepAlive)
             .build()
 
+    /**
+     * Intent gate options: deterministic, JSON-constrained, tiny token budget.
+     *
+     * numCtx is deliberately the SAME full window as every other pass: `num_ctx` is a
+     * load-time parameter for Ollama, so a different value here would spawn a separate
+     * runner and force a model reload on every gate→voice alternation — far more expensive
+     * than the KV memory a smaller window would save.
+     */
     private fun intentGateOptions(): OllamaOptions =
         OllamaOptions.builder()
             .model(properties.brainModelName)
             .temperature(0.0)
-            .numCtx(properties.performance.numCtx.coerceAtMost(1024))
-            .numPredict(8)
+            .format("json")
+            .numCtx(properties.performance.numCtx)
+            .numPredict(24)
             .numThread(properties.performance.numThread)
+            .keepAlive(properties.performance.keepAlive)
             .build()
 
     /**
-     * Verifier options: brain model, deterministic, single-word budget. Unlike the intent gate,
-     * numCtx stays at the full window — the judge must read the whole source [context] (up to the
-     * web-fetch budget) alongside the answer to check grounding.
+     * Verifier options: brain model, deterministic, JSON-constrained verdict. numCtx is the
+     * full window — the judge must read the whole source [context] (up to the web-fetch
+     * budget) alongside the answer to check grounding.
      */
     private fun verifyOptions(): OllamaOptions =
         OllamaOptions.builder()
             .model(properties.brainModelName)
             .temperature(0.0)
+            .format("json")
             .numCtx(properties.performance.numCtx)
-            .numPredict(8)
+            .numPredict(24)
             .numThread(properties.performance.numThread)
+            .keepAlive(properties.performance.keepAlive)
             .build()
 
     /**
-     * Condense options: brain model, deterministic, small budget — the output is a single
-     * rewritten question, and the input transcript is short (last 6 turns, 400 chars each).
+     * Condense options: brain model, deterministic, JSON-constrained, small budget — the
+     * output is a single rewritten question. Full numCtx for the same runner-reuse reason
+     * as [intentGateOptions].
      */
     private fun condenseOptions(): OllamaOptions =
         OllamaOptions.builder()
             .model(properties.brainModelName)
             .temperature(0.0)
-            .numCtx(properties.performance.numCtx.coerceAtMost(4096))
-            .numPredict(96)
+            .format("json")
+            .numCtx(properties.performance.numCtx)
+            .numPredict(160)
             .numThread(properties.performance.numThread)
+            .keepAlive(properties.performance.keepAlive)
             .build()
 
     private fun legacyOptions(): OllamaOptions =
@@ -602,12 +633,26 @@ class OllamaAiService(
             .numCtx(properties.performance.numCtx)
             .numPredict(properties.performance.numPredict)
             .numThread(properties.performance.numThread)
+            .keepAlive(properties.performance.keepAlive)
             .build()
 
     internal companion object {
 
+        private val JSON = com.fasterxml.jackson.databind.ObjectMapper()
+
         /**
-         * Maps the intent gate's raw single-word output to an [Intent]. Pure and
+         * Extracts a string [field] from the model's JSON output, or null when the output
+         * isn't parseable JSON / lacks the field. The constrained passes run with Ollama's
+         * `format: json`, but every caller keeps its old bare-word parsing as the fallback,
+         * so a model that ignores the format (or truncates mid-JSON) degrades to exactly the
+         * pre-JSON behaviour — the fail-open contracts are untouched.
+         */
+        private fun jsonField(raw: String, field: String): String? =
+            runCatching { JSON.readTree(raw).get(field)?.asText() }.getOrNull()
+
+        /**
+         * Maps the intent gate's output — `{"intent":"mod|kb|chat"}` under `format: json`,
+         * or a bare word from a non-conforming model — to an [Intent]. Pure and
          * side-effect-free so the routing contract can be unit-tested without invoking the
          * model. Matching is prefix-based and case-insensitive (the model occasionally adds
          * trailing punctuation or whitespace despite the prompt), and ANY unrecognised
@@ -615,7 +660,7 @@ class OllamaAiService(
          * a moderation tool (the voice-only pass has no tools attached).
          */
         internal fun parseIntent(raw: String): Intent {
-            val s = raw.trim().lowercase()
+            val s = (jsonField(raw, "intent") ?: raw).trim().lowercase()
             return when {
                 s.startsWith("mod") -> Intent.MODERATION
                 s.startsWith("kb") -> Intent.KNOWLEDGE
@@ -625,26 +670,32 @@ class OllamaAiService(
         }
 
         /**
-         * Maps the grounding judge's raw output to a pass/fail. Returns false ONLY on a clear
-         * negative verdict ("nao"/"não"/"no"); any other or unrecognised output passes. Pure, so
-         * the fail-open contract is unit-testable without a model. The asymmetry is deliberate:
-         * abstaining requires the judge to actively reject, so an ambiguous verdict never silences
-         * an answer the deterministic gate already grounded.
+         * Maps the grounding judge's output — `{"veredito":"sim|nao"}` under `format: json`,
+         * or a bare word — to a pass/fail. Returns false ONLY on a clear negative verdict
+         * ("nao"/"não"/"no"); any other or unrecognised output passes. Pure, so the fail-open
+         * contract is unit-testable without a model. The asymmetry is deliberate: abstaining
+         * requires the judge to actively reject, so an ambiguous verdict never silences an
+         * answer the deterministic gate already grounded.
          */
         internal fun parseVerdict(raw: String): Boolean {
-            val s = raw.trim().lowercase().trimStart('"', '\'', '`', ' ')
+            val s = (jsonField(raw, "veredito") ?: raw).trim().lowercase().trimStart('"', '\'', '`', ' ')
             return !(s.startsWith("nao") || s.startsWith("não") || s.startsWith("no"))
         }
 
         /**
-         * Guards the condense step's output before it replaces the grounding query. The model
-         * occasionally answers instead of rewriting, or pads with explanation — both show up
-         * as multi-line or bloated output, so anything blank, multi-line, or much longer than
-         * a question falls back to [fallback] (the original question). Pure, so the fail-open
-         * contract is unit-testable without a model.
+         * Guards the condense step's output — `{"pergunta":"..."}` under `format: json`, or
+         * bare text — before it replaces the grounding query. The model occasionally answers
+         * instead of rewriting, or pads with explanation — both show up as multi-line or
+         * bloated output, so anything blank, multi-line, or much longer than a question
+         * falls back to [fallback] (the original question). Pure, so the fail-open contract
+         * is unit-testable without a model.
          */
         internal fun sanitizeCondensed(raw: String, fallback: String): String {
-            val s = raw.trim().trim('"', '\'', '`').trim()
+            // JSON-looking output that didn't parse (truncated mid-string) must not leak into
+            // the query as literal braces — treat it as unusable rather than as bare text.
+            val candidate = jsonField(raw, "pergunta")
+                ?: raw.takeUnless { it.trimStart().startsWith("{") }.orEmpty()
+            val s = candidate.trim().trim('"', '\'', '`').trim()
             if (s.isEmpty() || s.contains('\n') || s.length > 300) return fallback
             return s
         }
@@ -656,10 +707,13 @@ class OllamaAiService(
             PT-BR, resolvendo pronomes e referências ("ela", "dele", "esse cone",
             "e os Eidolons?") com os nomes citados antes na conversa.
 
-            - NÃO responda a pergunta. A saída é SOMENTE a pergunta reescrita, em uma linha.
+            - NÃO responda a pergunta.
             - Se a pergunta já é autônoma, repita-a exatamente como veio.
             - Preserve pedidos de profundidade ("kit completo", "pesquisa na internet").
             - Ignore rótulos como "[nome]:" — eles indicam apenas quem falou.
+
+            Responda APENAS com JSON neste formato, nada mais:
+            {"pergunta": "<a pergunta reescrita, em uma linha>"}
         """.trimIndent()
 
         /** Strips a leading "[name]: " speaker tag that the mention path prepends to turns. */
@@ -698,6 +752,60 @@ class OllamaAiService(
             return if (s in OBVIOUS_CHAT) Intent.CHAT else null
         }
 
+        /** Splits normalized text into word tokens for the cue checks below. */
+        private val NON_WORD = Regex("[^\\p{L}\\p{N}]+")
+
+        private fun tokensOf(message: String): Set<String> =
+            HsrCharacterService.normalize(message).split(NON_WORD).filterTo(mutableSetOf()) { it.isNotEmpty() }
+
+        /**
+         * Words that smell like a moderation/Discord-state request. Deliberately broad —
+         * a cue here only DEFERS to the LLM gate (the pre-gazetteer behaviour), so a false
+         * positive costs one LLM call, never a misroute. A `<@` mention counts too: mod
+         * actions target mentions, and a message about another user is rarely a kb question.
+         */
+        private val MOD_CUES = setOf(
+            "muta", "mutar", "mute", "silencia", "silenciar", "cala", "calar", "timeout",
+            "castiga", "castigar", "desmuta", "desmutar", "libera", "liberar",
+            "expulsa", "expulsar", "chuta", "chutar", "kick",
+            "bane", "banir", "ban", "unban", "desbane",
+            "limpa", "limpar", "apaga", "apagar", "purge", "clear",
+            "slowmode", "lento", "cargo", "cargos",
+            "servidor", "membros", "permissao", "permissoes",
+        )
+
+        /**
+         * Words/shapes that make a character mention look like a knowledge QUESTION rather
+         * than casual chat that happens to name a character ("a acheron é linda" must not
+         * fast-path). A '?' anywhere qualifies; otherwise one of the HSR-question tokens.
+         */
+        private val KNOWLEDGE_CUES = setOf(
+            "quem", "qual", "quais", "como", "quando", "onde",
+            "kit", "build", "builds", "cone", "cones", "eidolon", "eidolons",
+            "reliquia", "reliquias", "time", "times", "sinergia", "elemento", "caminho",
+            "habilidade", "habilidades", "talento", "tecnica", "ultimate", "ult",
+            "status", "banner", "lore", "farmar", "materiais",
+        )
+
+        internal fun hasModerationCue(message: String): Boolean =
+            message.contains("<@") || tokensOf(message).any { it in MOD_CUES }
+
+        internal fun hasKnowledgeShape(message: String): Boolean =
+            message.contains('?') || tokensOf(message).any { it in KNOWLEDGE_CUES }
+
+        /**
+         * Gazetteer fast-path decision. Fires KNOWLEDGE only when the message is question-
+         * shaped, carries no moderation cue, and [mentionsCharacter] confirms a known HSR
+         * character name; anything else returns null (defer to the LLM gate — exactly the
+         * old behaviour). The character lookup is a lambda so this stays pure and testable
+         * without the DB-backed service.
+         */
+        internal fun gazetteerFastPath(message: String, mentionsCharacter: (String) -> Boolean): Intent? {
+            val s = SPEAKER_PREFIX.replace(message.trim(), "")
+            if (hasModerationCue(s) || !hasKnowledgeShape(s)) return null
+            return if (mentionsCharacter(s)) Intent.KNOWLEDGE else null
+        }
+
         /**
          * Decides which voice rendering to use from the brain's output and the gate intent.
          * Pure, so the dispatch in [runVoicePass] is unit-testable without invoking a model.
@@ -725,8 +833,8 @@ class OllamaAiService(
          * can't decide to moderate someone over a greeting.
          */
         val INTENT_GATE_INSTRUCTIONS = """
-            Você é um classificador. Olhe a mensagem do usuário e responda APENAS uma
-            palavra: "mod", "kb" ou "chat". Nada mais.
+            Você é um classificador. Olhe a mensagem do usuário e responda APENAS com JSON
+            neste formato: {"intent": "mod"} — onde o valor é "mod", "kb" ou "chat". Nada mais.
 
             Responda "mod" quando a mensagem pede:
             - uma ação de moderação contra um membro do Discord: mutar/silenciar/calar/
@@ -758,7 +866,7 @@ class OllamaAiService(
 
             Na dúvida entre "kb" e "chat" para algo de HSR, prefira SEMPRE "kb" — é melhor
             consultar a base do que arriscar inventar um personagem ou status.
-            Não explique. Não comente. Não use pontuação. APENAS "mod", "kb" ou "chat".
+            Não explique. Não comente. APENAS o JSON: {"intent": "mod"|"kb"|"chat"}.
         """.trimIndent()
 
         /**
@@ -772,11 +880,12 @@ class OllamaAiService(
             elementos, caminhos, habilidades, números, efeitos) está sustentada pelo CONTEXTO.
 
             - Se algo na RESPOSTA NÃO aparece no CONTEXTO (foi inventado ou contradiz a fonte),
-              responda "nao".
-            - Se tudo na RESPOSTA está apoiado no CONTEXTO, responda "sim".
+              o veredito é "nao".
+            - Se tudo na RESPOSTA está apoiado no CONTEXTO, o veredito é "sim".
             - Vocativos, saudações e tom carinhoso NÃO contam como afirmação factual — ignore-os.
 
-            Responda APENAS uma palavra: "sim" ou "nao". Nada mais.
+            Responda APENAS com JSON neste formato: {"veredito": "sim"} ou {"veredito": "nao"}.
+            Nada mais.
         """.trimIndent()
 
         /** Sentinel returned by the brain when the user's message needs no tool action

@@ -85,4 +85,41 @@ class KnowledgeGrounderTest {
     fun `subjectMentioned passes when it cannot judge (all-short subject)`() {
         assertTrue(KnowledgeGrounder.subjectMentioned("yu", "conteúdo qualquer sem o nome"))
     }
+
+    @Test
+    fun `subjectGrounded accepts a subject named in the context only under a localized alias`() {
+        // "quem é March 7th?" grounded against a pt-BR chunk that says "Março 7".
+        assertTrue(
+            KnowledgeGrounder.subjectGrounded(
+                "march 7th",
+                "Março 7 é uma personagem do caminho da Preservação.",
+                aliases = listOf("March 7th", "Março 7", "Marzo 7"),
+            ),
+        )
+    }
+
+    @Test
+    fun `subjectGrounded still fails a fake name — no aliases means no loosening`() {
+        assertFalse(
+            KnowledgeGrounder.subjectGrounded(
+                "lilita",
+                "Acheron é uma personagem do elemento Raio.",
+                aliases = emptyList(),
+            ),
+        )
+    }
+
+    @Test
+    fun `enrichQuery appends only the aliases the query does not already use`() {
+        assertEquals(
+            "quem é a acheron? (Verdadeiro Nome)",
+            KnowledgeGrounder.enrichQuery("quem é a acheron?", listOf("Acheron", "Verdadeiro Nome")),
+        )
+        // Duplicated aliases (en == pt == es) collapse; nothing to add → query untouched.
+        assertEquals(
+            "quem é a acheron?",
+            KnowledgeGrounder.enrichQuery("quem é a acheron?", listOf("Acheron", "Acheron", "Acheron")),
+        )
+        assertEquals("qual o melhor time?", KnowledgeGrounder.enrichQuery("qual o melhor time?", emptyList()))
+    }
 }

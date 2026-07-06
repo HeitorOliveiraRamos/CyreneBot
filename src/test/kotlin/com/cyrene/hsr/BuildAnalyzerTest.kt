@@ -81,6 +81,127 @@ class BuildAnalyzerTest {
         assertEquals(3, report.weakest?.slot)
     }
 
+    private fun scored(
+        slot: Int,
+        score: Double,
+        level: Int = 15,
+        mainWeight: Double = 1.0,
+        mainName: String = "x",
+    ) = BuildAnalyzer.RelicScore(
+        slot = slot, level = level, setName = "Set", mainName = mainName,
+        mainWeight = mainWeight, score = score, rank = BuildAnalyzer.rank(score), deadSubs = emptyList(),
+    )
+
+    /** Realistic ruler shape: mains for all six slots (like the real score.json). */
+    private val fullWeights = ScoreWeights.CharWeights(
+        main = mapOf(
+            1 to mapOf("HPDelta" to 1.0),
+            2 to mapOf("AttackDelta" to 1.0),
+            3 to mapOf("CriticalChanceBase" to 1.0, "HPAddedRatio" to 0.5),
+            4 to mapOf("SpeedDelta" to 1.0),
+            5 to mapOf("AttackAddedRatio" to 1.0),
+            6 to mapOf("SPRatioBase" to 1.0),
+        ),
+        weight = mapOf("CriticalDamageBase" to 1.0, "SpeedDelta" to 1.0),
+        max = 11.0,
+    )
+
+    @Test
+    fun `farmPlan puts empty slots first and caps the list`() {
+        val plan = BuildAnalyzer.farmPlan(
+            relics = listOf(scored(slot = 3, score = 5.0, mainWeight = 0.5)),
+            missingSlots = listOf(1, 2, 4, 5, 6),
+            weights = fullWeights,
+        )
+        assertEquals(3, plan.size)
+        assertTrue(plan.all { "vazio" in it }, plan.toString())
+    }
+
+    @Test
+    fun `farmPlan flags a wrong main with the ideal replacements, heaviest first`() {
+        val plan = BuildAnalyzer.farmPlan(
+            relics = listOf(scored(slot = 3, score = 3.0, mainWeight = 0.0, mainName = "ATQ%")),
+            missingSlots = emptyList(),
+            weights = fullWeights,
+        )
+        val line = plan.single()
+        assertTrue("não serve" in line && "ATQ%" in line, line)
+        assertTrue("Chance Crít./PV%" in line, line)
+    }
+
+    @Test
+    fun `farmPlan suggests leveling an underleveled piece before anything else`() {
+        val plan = BuildAnalyzer.farmPlan(
+            relics = listOf(scored(slot = 4, score = 5.3, level = 8)),
+            missingSlots = emptyList(),
+            weights = fullWeights,
+        )
+        assertTrue("+8 para +15" in plan.single(), plan.single())
+    }
+
+    @Test
+    fun `farmPlan suggests a substat refarm for a sub-par piece whose main is acceptable`() {
+        val plan = BuildAnalyzer.farmPlan(
+            relics = listOf(scored(slot = 3, score = 5.0, mainWeight = 0.5)),
+            missingSlots = emptyList(),
+            weights = fullWeights,
+        )
+        val line = plan.single()
+        assertTrue("refarm" in line, line)
+        assertTrue("Dano Crít. > Velocidade" in line, line)
+    }
+
+    @Test
+    fun `farmPlan skips wrong-main advice when the ruler has no ideal mains for the slot`() {
+        val noSlotMains = ScoreWeights.CharWeights(
+            main = mapOf(3 to mapOf("CriticalChanceBase" to 1.0)),
+            weight = mapOf("CriticalDamageBase" to 1.0),
+            max = 11.0,
+        )
+        val plan = BuildAnalyzer.farmPlan(
+            relics = listOf(scored(slot = 5, score = 5.0, mainWeight = 0.0)),
+            missingSlots = emptyList(),
+            weights = noSlotMains,
+        )
+        // Falls through to the refarm suggestion instead of "troque por —".
+        assertTrue(plan.single().let { "refarm" in it && "troque" !in it }, plan.toString())
+    }
+
+    @Test
+    fun `farmPlan is empty when nothing is worth farming, and render falls back to the weakest line`() {
+        val relics = (1..6).map { scored(slot = it, score = 8.0) }
+        assertTrue(BuildAnalyzer.farmPlan(relics, emptyList(), fullWeights).isEmpty())
+
+        val report = BuildAnalyzer.BuildReport(
+            relics = relics, missingSlots = emptyList(), totalScore = 8.0, totalRank = "S",
+            weakest = relics.first(), farmPlan = emptyList(),
+        )
+        val character = MihomoCharacter(
+            id = "1308", name = "Acheron", level = 80, eidolon = 0,
+            pathName = "Niilismo", elementName = "Raio", lightCone = null,
+            relics = emptyList(), relicSets = emptyList(),
+        )
+        val out = BuildAnalyzer.render(character, report)
+        assertTrue("Peça mais fraca" in out, out)
+        assertTrue("Próximo farm" !in out, out)
+    }
+
+    @Test
+    fun `render shows the farm plan section when the report carries one`() {
+        val report = BuildAnalyzer.BuildReport(
+            relics = emptyList(), missingSlots = emptyList(), totalScore = 5.0, totalRank = "C",
+            weakest = null, farmPlan = listOf("**Corpo**: subir de +8 para +15 já melhora a nota."),
+        )
+        val character = MihomoCharacter(
+            id = "1308", name = "Acheron", level = 80, eidolon = 0,
+            pathName = "Niilismo", elementName = "Raio", lightCone = null,
+            relics = emptyList(), relicSets = emptyList(),
+        )
+        val out = BuildAnalyzer.render(character, report)
+        assertTrue("**Próximo farm:**" in out, out)
+        assertTrue("+8 para +15" in out, out)
+    }
+
     @Test
     fun `rank thresholds map scores to the expected letters`() {
         assertEquals("SS", BuildAnalyzer.rank(8.5))

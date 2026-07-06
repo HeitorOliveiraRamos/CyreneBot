@@ -35,6 +35,9 @@ spring:
       embedding:
         options:
           model: ${EMBED_MODEL_NAME:nomic-embed-text}
+          # Keep the embed model resident — lookupHsr embeds every knowledge query, and
+          # Ollama's 5m default unload would add a model load to the first query after a lull.
+          keep-alive: ${OLLAMA_KEEP_ALIVE:30m}
     vectorstore:
       pgvector:
         # Spring AI creates the `vector_store` table + HNSW index on first start.
@@ -69,6 +72,10 @@ bot:
   # larger ctx grows the KV cache.
   performance:
     num-ctx: ${OLLAMA_NUM_CTX:16384}
+    # How long Ollama keeps the chat model loaded after a call. The 5m Ollama default
+    # unloads after a quiet spell, so the next mention pays a full model load (10-30s)
+    # before the first token. "-1m" = never unload.
+    keep-alive: ${OLLAMA_KEEP_ALIVE:30m}
     num-predict: ${OLLAMA_NUM_PREDICT:512}
     num-thread: ${OLLAMA_NUM_THREAD:8}
     # Max reply pipelines allowed to hit Ollama concurrently. A single local Ollama
@@ -116,6 +123,10 @@ bot:
     # on for a single run after a new patch:
     #   HSR_REINDEX=true java -jar cyrene-bot.jar    (or mvn spring-boot:run)
     reindex: ${HSR_REINDEX:false}
+    # When the daily freshness check sees nanoka serving a NEWER data version than the one
+    # indexed, reindex automatically instead of just warning. Load-before-truncate: a broken
+    # fetch never wipes a working KB. Disable to go back to warn-only + manual HSR_REINDEX.
+    auto-reindex: ${HSR_AUTO_REINDEX:true}
     # nanoka.cc data source for the reindex (structured JSON, no scraping). The patch version
     # is auto-discovered from the home page; pin it via HSR_NANOKA_VERSION to freeze a patch.
     nanoka-home-url: ${HSR_NANOKA_HOME:https://hsr.nanoka.cc/}
@@ -147,6 +158,12 @@ bot:
     # (Mar-7th), so character ids match between the two.
     mihomo-url: ${HSR_MIHOMO_URL:https://api.mihomo.me/sr_info_parsed}
     score-json-url: ${HSR_SCORE_JSON_URL:https://raw.githubusercontent.com/Mar-7th/StarRailScore/master/score.json}
+    # hsr_character cache sources (names en/pt/es + fribbels build metadata), harvested in
+    # background every ~30 days: StarRailRes index (same ids as mihomo) and the
+    # fribbels/hsr-optimizer repo (tree listing via GitHub API + raw file fetches).
+    star-rail-res-base: ${HSR_STARRAILRES_BASE:https://raw.githubusercontent.com/Mar-7th/StarRailRes/master/index_min/}
+    fribbels-tree-url: ${HSR_FRIBBELS_TREE_URL:https://api.github.com/repos/fribbels/hsr-optimizer/git/trees/main?recursive=1}
+    fribbels-raw-base: ${HSR_FRIBBELS_RAW_BASE:https://raw.githubusercontent.com/fribbels/hsr-optimizer/main/}
     # Verify web-sourced HSR answers against the fetched page text with a cheap LLM judge
     # before sending (one short round-trip per web answer; local-KB answers skip it). Set
     # false to drop the judge if web replies feel slow and you trust deterministic grounding.

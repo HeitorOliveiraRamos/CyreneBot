@@ -1,5 +1,6 @@
 package com.cyrene.knowledge
 
+import com.cyrene.hsr.HsrCharacterService
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 
@@ -43,12 +44,23 @@ data class Grounding(
 @Component
 class KnowledgeGrounder(
     private val tools: GameKnowledgeTools,
+    private val characters: HsrCharacterService,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
 
     fun ground(query: String): Grounding {
-        val local = runCatching { tools.lookupHsr(query) }.getOrElse {
+        // Gazetteer enrichment: when the query names a known character, append the aliases
+        // the query DOESN'T use (en/pt/es) to the retrieval string. Users ask in PT-BR
+        // against chunks/pages that may only carry the English name — the extra aliases pull
+        // the embedding (and the web search) toward the right character. The roster guard
+        // below still runs on the ORIGINAL query, so enrichment can't launder a fake name.
+        val retrievalQuery = enrichQuery(query, characters.findInText(query).flatMap { it.names })
+        if (retrievalQuery != query && log.isDebugEnabled) {
+            log.debug("Gazetteer enriched '{}' → '{}'", query, retrievalQuery)
+        }
+
+        val local = runCatching { tools.lookupHsr(retrievalQuery) }.getOrElse {
             log.warn("lookupHsr threw during grounding for '{}'", query, it)
             emptyMap()
         }
@@ -58,7 +70,7 @@ class KnowledgeGrounder(
             log.debug("Roster guard rejected local hit for '{}' (subject absent from chunks)", query)
         }
 
-        val web = runCatching { tools.searchWeb(query) }.getOrElse {
+        val web = runCatching { tools.searchWeb(retrievalQuery) }.getOrElse {
             log.warn("searchWeb threw during grounding for '{}'", query, it)
             emptyMap()
         }
@@ -76,11 +88,18 @@ class KnowledgeGrounder(
      * [context]. Every name in a "quem é X? quem é Y?" (or "X, Y e Z") batch must be grounded;
      * one ungrounded name fails the whole answer, because the model will otherwise fuse real
      * retrieved lore onto the fake name (that's the "Cora/Carmilla/Sylph" failure).
+     *
+     * A subject that resolves to a known character is also checked under its OTHER
+     * localized names: "quem é March 7th?" grounds against a chunk that says "Março 7".
+     * Fake names resolve to nothing, so they gain no aliases and fail exactly as before.
      */
     private fun passesRosterGuard(query: String, context: String): Boolean {
         val subjects = entitySubjects(query)
         if (subjects.isEmpty()) return true
-        return subjects.all { subjectMentioned(it, context) }
+        return subjects.all { s ->
+            val aliases = characters.resolveId(s)?.let { characters.byId(it)?.names }.orEmpty()
+            subjectGrounded(s, context, aliases)
+        }
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -151,5 +170,29 @@ class KnowledgeGrounder(
 
         private fun wordPresent(token: String, context: String): Boolean =
             Regex("(?iuU)\\b" + Regex.escape(token) + "\\b").containsMatchIn(context)
+
+        /**
+         * [subjectMentioned] extended with localized [aliases]: the subject counts as grounded
+         * when the context names it directly OR under any known alias of the character it
+         * resolved to. Pure, so the cross-language pass is unit-testable without a DB.
+         */
+        internal fun subjectGrounded(subject: String, context: String, aliases: List<String>): Boolean =
+            subjectMentioned(subject, context) ||
+                aliases.any { it.isNotBlank() && subjectMentioned(it, context) }
+
+        /**
+         * Appends to [query] whichever [aliases] it doesn't already contain (accent/case-
+         * insensitive whole-word check, so "acheron" in the query suppresses "Acheron").
+         * Pure; returns [query] untouched when there is nothing to add.
+         */
+        internal fun enrichQuery(query: String, aliases: List<String>): String {
+            val qNorm = HsrCharacterService.normalize(query)
+            val extras = aliases.asSequence()
+                .filter { it.isNotBlank() }
+                .distinct()
+                .filterNot { HsrCharacterService.containsWord(qNorm, HsrCharacterService.normalize(it)) }
+                .toList()
+            return if (extras.isEmpty()) query else "$query (${extras.joinToString(", ")})"
+        }
     }
 }

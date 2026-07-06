@@ -5,28 +5,26 @@ import org.slf4j.LoggerFactory
 import org.springframework.ai.document.Document
 import org.springframework.ai.vectorstore.VectorStore
 import org.springframework.boot.CommandLineRunner
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Component
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * One-shot loader that rebuilds the Honkai: Star Rail vector store from
- * [NanokaIngestionSource] (structured JSON from [nanoka.cc](https://hsr.nanoka.cc)).
+ * Rebuilds the Honkai: Star Rail vector store from [NanokaIngestionSource] (structured
+ * JSON from [nanoka.cc](https://hsr.nanoka.cc)).
  *
- * Run-once by design: it only exists as a bean when `bot.knowledge.reindex=true`, so normal
- * bot startups don't touch it. To (re)build the knowledge base after a new patch:
- *
- * ```
- * HSR_REINDEX=true mvn spring-boot:run
- * # ...wait for "HSR reindex complete", Ctrl-C, then run normally.
- * ```
+ * Two triggers, same [reindex] body:
+ *  - startup, when `bot.knowledge.reindex=true` (`HSR_REINDEX=true mvn spring-boot:run`) —
+ *    the manual, run-once path;
+ *  - [KbFreshnessCheck], when `bot.knowledge.auto-reindex` is on and nanoka starts serving
+ *    a newer data version than the one indexed — the hands-off path.
  *
  * The version is auto-discovered from nanoka's home page; pin it with `HSR_NANOKA_VERSION` to
  * freeze a patch. nanoka is the sole source — it carries fuller, current-per-patch kits than
  * the old Kaggle CSV dump, so this truncates `vector_store` and re-embeds purely from it.
+ * Documents are loaded BEFORE the truncate, so a broken fetch never wipes a working KB.
  */
 @Component
-@ConditionalOnProperty(name = ["bot.knowledge.reindex"], havingValue = "true")
 class HsrKnowledgeIngestion(
     private val vectorStore: VectorStore,
     private val jdbcTemplate: JdbcTemplate,
@@ -36,18 +34,36 @@ class HsrKnowledgeIngestion(
 
     private val log = LoggerFactory.getLogger(javaClass)
 
+    /** Guards against overlapping rebuilds (startup runner vs. the scheduled check). */
+    private val running = AtomicBoolean(false)
+
     override fun run(vararg args: String?) {
-        val docs = nanoka.load()
-        if (docs.isEmpty()) {
-            log.error("Parsed 0 usable documents from nanoka — aborting before clearing the store.")
+        if (!properties.knowledge.reindex) return
+        reindex()
+        log.info("Restart WITHOUT HSR_REINDEX to run normally.")
+    }
+
+    /** Full rebuild: load from nanoka, truncate, embed, record version. Safe to call live. */
+    fun reindex() {
+        if (!running.compareAndSet(false, true)) {
+            log.warn("Reindex já em andamento — ignorando pedido concorrente.")
             return
         }
+        try {
+            val docs = nanoka.load()
+            if (docs.isEmpty()) {
+                log.error("Parsed 0 usable documents from nanoka — aborting before clearing the store.")
+                return
+            }
 
-        log.info("Clearing vector_store and embedding {} documents...", docs.size)
-        jdbcTemplate.execute("TRUNCATE TABLE vector_store")
-        embedInBatches(docs)
-        recordIndexedVersion()
-        log.info("HSR reindex complete: {} documents embedded. Restart WITHOUT HSR_REINDEX to run normally.", docs.size)
+            log.info("Clearing vector_store and embedding {} documents...", docs.size)
+            jdbcTemplate.execute("TRUNCATE TABLE vector_store")
+            embedInBatches(docs)
+            recordIndexedVersion()
+            log.info("HSR reindex complete: {} documents embedded.", docs.size)
+        } finally {
+            running.set(false)
+        }
     }
 
     /**
