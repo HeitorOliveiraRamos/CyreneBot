@@ -56,6 +56,17 @@ class OllamaAiServiceRoutingTest {
     }
 
     @Test
+    fun `hasCjk flags the Chinese-drift answer and passes clean PT-BR`() {
+        // The reported failure: a PT-BR reply whose kit descriptions came out in Chinese.
+        assertEquals(true, OllamaAiService.hasCjk("Deve ser usado para atacar um alvo单一目标。造成Aventurine防御力140%的想象伤害。"))
+        assertEquals(true, OllamaAiService.hasCjk("提供全体友方一个护盾"))
+        // Clean PT-BR with Latin-script proper nouns, numbers and emoji must pass.
+        assertEquals(false, OllamaAiService.hasCjk("Aventurine é 5★, caminho da Preservação, elemento Imaginário! 💜"))
+        assertEquals(false, OllamaAiService.hasCjk("**Straight Bet (Ataque Básico)**: causa 140% da DEF como dano Imaginário."))
+        assertEquals(false, OllamaAiService.hasCjk(""))
+    }
+
+    @Test
     fun `parseVerdict fails only on a clear negative, passing everything else (fail-open)`() {
         // A clear "no" suppresses the answer (abstain)...
         assertEquals(false, OllamaAiService.parseVerdict("nao"))

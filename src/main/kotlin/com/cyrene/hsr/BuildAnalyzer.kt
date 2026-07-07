@@ -188,7 +188,8 @@ object BuildAnalyzer {
         "ImaginaryAddedRatio" to "Dano Imaginário",
     )
 
-    private fun statPt(prop: String): String = PROP_PT[prop] ?: prop
+    /** Also used by the nanoka ingester to label recommended-build stats. */
+    internal fun statPt(prop: String): String = PROP_PT[prop] ?: prop
 
     /**
      * The fribbels-sourced recommendation block: sets, ideal mains (✓ when the equipped

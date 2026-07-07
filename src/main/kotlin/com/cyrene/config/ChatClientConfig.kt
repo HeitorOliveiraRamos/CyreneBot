@@ -2,6 +2,7 @@ package com.cyrene.config
 
 import com.cyrene.discord.tools.DiscordTools
 import com.cyrene.knowledge.GameKnowledgeTools
+import com.cyrene.skills.SkillTools
 import org.springframework.ai.chat.client.ChatClient
 import org.springframework.ai.ollama.OllamaChatModel
 import org.springframework.ai.tool.method.MethodToolCallbackProvider
@@ -23,9 +24,10 @@ class ChatClientConfig {
     fun discordToolCallbacks(
         discordTools: DiscordTools,
         knowledgeTools: GameKnowledgeTools,
+        skillTools: SkillTools,
     ): MethodToolCallbackProvider =
         MethodToolCallbackProvider.builder()
-            .toolObjects(discordTools, knowledgeTools)
+            .toolObjects(discordTools, knowledgeTools, skillTools)
             .build()
 
     @Bean

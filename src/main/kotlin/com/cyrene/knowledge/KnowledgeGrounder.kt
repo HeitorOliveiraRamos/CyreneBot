@@ -49,7 +49,18 @@ class KnowledgeGrounder(
 
     private val log = LoggerFactory.getLogger(javaClass)
 
-    fun ground(query: String): Grounding {
+    /**
+     * [onWebSearch] fires just before the (slow) web tier runs, so callers can surface
+     * "searching the web…" progress; the local tier is fast enough to not need one.
+     *
+     * Tier order is decided by [wantsWeb]: questions that smell like NEWS (explicit
+     * "pesquisa na internet", announcements, leaks, "novo X", version numbers) go web-FIRST,
+     * because the local KB only knows released content — a name-anchored local hit for
+     * "novo Aventurine anunciado" would confidently ground the OLD kit and the web would
+     * never run. The other tier always remains as fallback, so a misfired cue costs one web
+     * round-trip, never an answer.
+     */
+    fun ground(query: String, onWebSearch: () -> Unit = {}): Grounding {
         // Gazetteer enrichment: when the query names a known character, append the aliases
         // the query DOESN'T use (en/pt/es) to the retrieval string. Users ask in PT-BR
         // against chunks/pages that may only carry the English name — the extra aliases pull
@@ -60,27 +71,51 @@ class KnowledgeGrounder(
             log.debug("Gazetteer enriched '{}' → '{}'", query, retrievalQuery)
         }
 
+        // Fandom tier (not built yet — the seam for lore-grade grounding): slot a
+        // groundFandom(query) here, first for lore-cue questions, backed by the MediaWiki
+        // API at https://honkai-star-rail.fandom.com/api.php —
+        //   search: ?action=query&list=search&srsearch=<q>&format=json&srlimit=3
+        //   page:   ?action=parse&page=<title>&format=json → parse.text["*"] →
+        //           WebSearchClient.htmlToText → cap at webFetchCharLimit
+        // Return the same Grounding contract (add Source.FANDOM) and the roster guard,
+        // verifier and answer cache all apply to it for free.
+        val webFirst = wantsWeb(query)
+        if (webFirst) {
+            log.debug("Web-first grounding for '{}' (news/explicit-search cue)", query)
+            groundWeb(query, newsQuery(query, characters.findInText(query).mapNotNull { it.nameEn }), recent = true, onWebSearch)?.let { return it }
+        }
+        groundLocal(query, retrievalQuery)?.let { return it }
+        if (!webFirst) {
+            groundWeb(query, retrievalQuery, recent = false, onWebSearch)?.let { return it }
+        }
+        return Grounding.EMPTY
+    }
+
+    /** Local KB tier; null when it missed or the roster guard rejected the hit. */
+    private fun groundLocal(query: String, retrievalQuery: String): Grounding? {
         val local = runCatching { tools.lookupHsr(retrievalQuery) }.getOrElse {
             log.warn("lookupHsr threw during grounding for '{}'", query, it)
             emptyMap()
         }
-        if (local["found"] == true) {
-            val ctx = formatLocal(local)
-            if (passesRosterGuard(query, ctx)) return Grounding(true, ctx, Grounding.Source.LOCAL)
-            log.debug("Roster guard rejected local hit for '{}' (subject absent from chunks)", query)
-        }
+        if (local["found"] != true) return null
+        val ctx = formatLocal(local)
+        if (passesRosterGuard(query, ctx)) return Grounding(true, ctx, Grounding.Source.LOCAL)
+        log.debug("Roster guard rejected local hit for '{}' (subject absent from chunks)", query)
+        return null
+    }
 
-        val web = runCatching { tools.searchWeb(retrievalQuery) }.getOrElse {
+    /** Web tier; null when it missed or the roster guard rejected the hit. */
+    private fun groundWeb(query: String, retrievalQuery: String, recent: Boolean, onWebSearch: () -> Unit): Grounding? {
+        onWebSearch()
+        val web = runCatching { tools.searchWeb(retrievalQuery, recent) }.getOrElse {
             log.warn("searchWeb threw during grounding for '{}'", query, it)
             emptyMap()
         }
-        if (web["found"] == true) {
-            val ctx = formatWeb(web)
-            if (ctx.isNotBlank() && passesRosterGuard(query, ctx)) return Grounding(true, ctx, Grounding.Source.WEB)
-            log.debug("Roster guard rejected web hit for '{}' (subject absent from page text)", query)
-        }
-
-        return Grounding.EMPTY
+        if (web["found"] != true) return null
+        val ctx = formatWeb(web)
+        if (ctx.isNotBlank() && passesRosterGuard(query, ctx)) return Grounding(true, ctx, Grounding.Source.WEB)
+        log.debug("Roster guard rejected web hit for '{}' (subject absent from page text)", query)
+        return null
     }
 
     /**
@@ -179,6 +214,56 @@ class KnowledgeGrounder(
         internal fun subjectGrounded(subject: String, context: String, aliases: List<String>): Boolean =
             subjectMentioned(subject, context) ||
                 aliases.any { it.isNotBlank() && subjectMentioned(it, context) }
+
+        /** Word tokens whose presence means the answer likely isn't in a static local KB. */
+        private val WEB_CUE_TOKENS = setOf(
+            // explicit "search the internet" requests
+            "internet", "web", "online", "google",
+            // recency / not-yet-released content
+            "novo", "nova", "novos", "novas",
+            "atual", "atuais", "proximo", "proxima", "proximos", "proximas",
+            "futuro", "futura", "futuros", "futuras", "breve",
+            "banner", "banners", "patch", "versao", "versoes",
+        )
+
+        /** Stem prefixes covering the morphology of announce/leak/release verbs. */
+        private val WEB_CUE_PREFIXES = listOf("anunciad", "anuncio", "vazad", "vazament", "leak", "lancad", "lancament")
+
+        /** A version number ("4.6") — patch talk, inherently about current/future content. */
+        private val VERSION_NUMBER = Regex("\\b\\d+\\.\\d+\\b")
+
+        private val TOKEN_SEP = Regex("[^\\p{L}\\p{N}]+")
+
+        /**
+         * True when the question should be grounded on the WEB before the local KB: the user
+         * explicitly asked for an internet search, or the subject is announced/leaked/new/
+         * versioned content a static KB can't know. Deliberately broad — this replaces the
+         * "searchWeb even if lookupHsr hit" rule the old brain prompt had, and a false
+         * positive only reorders the tiers (local remains the fallback), never loses data.
+         * Pure, so the routing is unit-testable without tools.
+         */
+        internal fun wantsWeb(query: String): Boolean {
+            val norm = HsrCharacterService.normalize(query)
+            if (VERSION_NUMBER.containsMatchIn(norm)) return true
+            return norm.split(TOKEN_SEP).any { t ->
+                t in WEB_CUE_TOKENS || WEB_CUE_PREFIXES.any { p -> t.startsWith(p) }
+            }
+        }
+
+        /**
+         * Search-engine query for a news-shaped question. Leak/announcement content lives on
+         * ENGLISH keyword-indexed pages, so a PT-BR sentence ("fiquei sabendo que teve novos
+         * personagens anunciados…") is the worst possible query for it. When the question
+         * carries anchors — known character names and/or version numbers — the query becomes
+         * `<anchors> new announcement leak`; without anchors we can't do better statically,
+         * so the original question just gets the EN news terms appended. Pure.
+         */
+        internal fun newsQuery(query: String, characterEnNames: List<String>): String {
+            val versions = VERSION_NUMBER.findAll(HsrCharacterService.normalize(query)).map { it.value }
+            val anchors = (characterEnNames.filter { it.isNotBlank() } + versions).distinct()
+            return if (anchors.isEmpty()) "$query new announcement leak"
+            else anchors.joinToString(" ") + " new announcement leak"
+        }
 
         /**
          * Appends to [query] whichever [aliases] it doesn't already contain (accent/case-

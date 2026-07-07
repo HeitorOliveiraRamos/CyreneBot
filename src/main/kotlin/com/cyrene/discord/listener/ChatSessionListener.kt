@@ -11,6 +11,7 @@ import com.cyrene.conversation.UsuarioService
 import com.cyrene.discord.tools.DiscordToolContext
 import com.cyrene.discord.util.BotMessages
 import com.cyrene.discord.util.DiscordMessageSender
+import com.cyrene.discord.util.ProgressStatus
 import com.cyrene.discord.util.TypingIndicator
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
@@ -82,8 +83,10 @@ class ChatSessionListener(
         }
 
         // Immediate feedback while the (slow, local) LLM pipeline runs; stopped in the
-        // same completion handler that releases the gate permit.
+        // same completion handler that releases the gate permit. The progress status is a
+        // reply that gets edited as pipeline stages advance, then deleted with the answer.
         val typing = typingIndicator.start(event.channel)
+        val progress = ProgressStatus(message)
 
         try {
             CompletableFuture
@@ -107,6 +110,7 @@ class ChatSessionListener(
                             toolContext = toolContext,
                             extraSystemPrompt = resolved?.systemPrompt,
                             userName = resolved?.effectiveName,
+                            progress = progress,
                         )
                     },
                     executor,
@@ -126,11 +130,13 @@ class ChatSessionListener(
                             sender.replyLong(message, reply)
                         }
                     } finally {
+                        progress.close()
                         typing.close()
                         inferenceGate.release()
                     }
                 }
         } catch (e: Exception) {
+            progress.close()
             typing.close()
             inferenceGate.release()
             log.error("Failed to submit chat-session work for conv {}", conversationId, e)

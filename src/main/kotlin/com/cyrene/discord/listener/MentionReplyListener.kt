@@ -13,6 +13,7 @@ import com.cyrene.discord.ReplyChainResolver
 import com.cyrene.discord.tools.DiscordToolContext
 import com.cyrene.discord.util.BotMessages
 import com.cyrene.discord.util.DiscordMessageSender
+import com.cyrene.discord.util.ProgressStatus
 import com.cyrene.discord.util.TypingIndicator
 import net.dv8tion.jda.api.entities.Message
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent
@@ -110,8 +111,10 @@ class MentionReplyListener(
         )
 
         // Immediate feedback while the (slow, local) LLM pipeline runs; stopped in the
-        // same completion handler that releases the gate permit.
+        // same completion handler that releases the gate permit. The progress status is a
+        // reply that gets edited as pipeline stages advance, then deleted with the answer.
         val typing = typingIndicator.start(event.channel)
+        val progress = ProgressStatus(event.message)
 
         try {
             CompletableFuture
@@ -141,6 +144,7 @@ class MentionReplyListener(
                             toolContext = toolContext,
                             extraSystemPrompt = resolved?.systemPrompt,
                             userName = resolved?.effectiveName,
+                            progress = progress,
                         )
                     },
                     executor,
@@ -156,6 +160,7 @@ class MentionReplyListener(
                             sender.replyLong(event.message, reply)
                         }
                     } finally {
+                        progress.close()
                         typing.close()
                         inferenceGate.release()
                     }
@@ -163,6 +168,7 @@ class MentionReplyListener(
         } catch (e: Exception) {
             // supplyAsync can reject synchronously if the executor is saturated; release the
             // permit we just took so it isn't leaked.
+            progress.close()
             typing.close()
             inferenceGate.release()
             log.error("MentionReplyListener could not submit work", e)

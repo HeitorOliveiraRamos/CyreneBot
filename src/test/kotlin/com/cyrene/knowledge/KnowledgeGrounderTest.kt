@@ -15,6 +15,50 @@ import kotlin.test.assertTrue
 class KnowledgeGrounderTest {
 
     @Test
+    fun `wantsWeb fires on announced-slash-new-content questions — the reported failure`() {
+        // "novos personagens anunciados … 4.6" grounded on the OLD local kit and never
+        // touched the web; every cue in that sentence must now force web-first.
+        assertTrue(
+            KnowledgeGrounder.wantsWeb(
+                "fiquei sabendo que teve novos personagens anunciados, uma robin nova e um " +
+                    "aventurine novo, pode pesquisar para mim o nome deles e a temática? " +
+                    "Acho que vão ser lançados na 4.6",
+            ),
+        )
+        assertTrue(KnowledgeGrounder.wantsWeb("qual o banner atual?"))
+        assertTrue(KnowledgeGrounder.wantsWeb("quando lança a versão 3.5?"))
+        assertTrue(KnowledgeGrounder.wantsWeb("teve algum leak do kit da Cipher?"))
+        assertTrue(KnowledgeGrounder.wantsWeb("pesquisa na internet o kit da Acheron"))
+    }
+
+    @Test
+    fun `newsQuery turns a PT-BR news sentence into EN keyword anchors`() {
+        assertEquals(
+            "Robin Aventurine 4.6 new announcement leak",
+            KnowledgeGrounder.newsQuery(
+                "fiquei sabendo que teve novos personagens anunciados, uma robin nova e um " +
+                    "aventurine novo, pode pesquisar o nome deles? Acho que vão ser lançados na 4.6",
+                listOf("Robin", "Aventurine"),
+            ),
+        )
+        // Version-only question: the number is the anchor.
+        assertEquals("3.5 new announcement leak", KnowledgeGrounder.newsQuery("quando lança a versão 3.5?", emptyList()))
+        // No anchors at all: keep the question, just append the EN news terms.
+        assertEquals(
+            "qual foi o último banner anunciado? new announcement leak",
+            KnowledgeGrounder.newsQuery("qual foi o último banner anunciado?", emptyList()),
+        )
+    }
+
+    @Test
+    fun `wantsWeb stays quiet for static KB questions`() {
+        assertFalse(KnowledgeGrounder.wantsWeb("quem é a Acheron?"))
+        assertFalse(KnowledgeGrounder.wantsWeb("qual o melhor cone pro Dan Heng?"))
+        assertFalse(KnowledgeGrounder.wantsWeb("kit completo da Robin"))
+        assertFalse(KnowledgeGrounder.wantsWeb("que elemento é o Jing Yuan"))
+    }
+
+    @Test
     fun `entitySubjects extracts a single name from a bare who-is question`() {
         assertEquals(listOf("lilita"), KnowledgeGrounder.entitySubjects("quem é lilita?"))
         assertEquals(listOf("acheron"), KnowledgeGrounder.entitySubjects("quem e a Acheron").map { it.lowercase() })

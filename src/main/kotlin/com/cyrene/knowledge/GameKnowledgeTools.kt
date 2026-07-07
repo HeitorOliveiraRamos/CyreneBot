@@ -78,14 +78,22 @@ class GameKnowledgeTools(
             emptyList()
         }
 
-        // Name hits lead (exact-entity precision), vector hits fill in; dedupe by content.
-        val results = (nameHits + docs.map { doc ->
+        // Name hits lead (exact-entity precision); vector hits fill in. When the query named an
+        // entity, mergeHits keeps the name tier authoritative — the vector fill is scoped to the
+        // SAME entities and the same kit section. Without that scope, semantic search drags in
+        // every other character's near-identical doc: build docs all read "build recomendada…
+        // Relíquias… Ornamento…", so "qual set da Cyrene" pulled in 4 unrelated builds. No name
+        // match → pure vector, exactly as before. Anchored docs are never truncated to topK
+        // (an entity's docs are stored profile→skills→eidolons; a flat cap dropped the tail).
+        val vectorHits = docs.map { doc ->
             mapOf(
                 "content" to doc.text,
                 "category" to (doc.metadata["category"] ?: "unknown"),
                 "name" to doc.metadata["name"],
             )
-        }).distinctBy { it["content"] }.take(k.topK + 3)
+        }
+        val cap = if (nameHits.isEmpty()) k.topK + 3 else MAX_ANCHORED + k.topK
+        val results = mergeHits(nameHits, vectorHits, query).take(cap)
 
         if (results.isEmpty()) {
             log.debug("lookupHsr: no local hit for '{}' (threshold {})", query, k.similarityThreshold)
@@ -140,7 +148,14 @@ class GameKnowledgeTools(
     fun searchWeb(
         @ToolParam(description = "O que buscar na internet, em linguagem natural. Ex.: 'banner atual versão 3.3', 'novo personagem 5 estrelas'.")
         query: String,
-    ): Map<String, Any?> {
+    ): Map<String, Any?> = searchWeb(query, recent = false)
+
+    /**
+     * [recent] variant for the deterministic grounder: news-shaped questions pass `true`,
+     * which makes [WebSearchClient] filter to the last month and read one extra page. Kept
+     * out of the @Tool signature so the model never sees (or hallucinates) the flag.
+     */
+    fun searchWeb(query: String, recent: Boolean): Map<String, Any?> {
         if (!webSearch.isEnabled) {
             return mapOf(
                 "found" to false,
@@ -149,7 +164,7 @@ class GameKnowledgeTools(
             )
         }
 
-        val results = webSearch.search(query, limit = properties.knowledge.topK)
+        val results = webSearch.search(query, limit = properties.knowledge.topK, recent = recent)
         if (results.isEmpty()) {
             return mapOf("found" to false, "note" to "Nenhum resultado online encontrado para a busca.")
         }
@@ -172,6 +187,80 @@ class GameKnowledgeTools(
     }
 
     internal companion object {
+        /** Ceiling on anchored docs so a 4-name listy question can't blow the 16k context. */
+        // ponytail: flat cap; per-entity budgeting if multi-character questions get truncated.
+        private const val MAX_ANCHORED = 30
+
+        private val TOKEN_SEP = Regex("[^\\p{L}\\p{N}]+")
+
+        /** "e2" / "eidolon 2" in a normalized query → the eidolon number asked about. */
+        private val EIDOLON_NUM = Regex("\\b(?:e|eidolon\\s*)([1-6])\\b")
+
+        /**
+         * Combines the exact name-anchored hits with the semantic vector fill. With no named
+         * entity the vector tier stands alone (deduped) — it's all we have. With a named entity
+         * the name tier is authoritative: the vector fill is scoped to the SAME entity names and
+         * then run through [filterBySection], so it can only add more chunks of what the user
+         * asked about, never a different character's look-alike doc. Pure, so this whole
+         * merge/scope contract is unit-testable without a vector store. Order (name hits first)
+         * is preserved, and [distinctBy] lets a name hit win over a duplicate vector hit.
+         */
+        internal fun mergeHits(
+            nameHits: List<Map<String, Any?>>,
+            vectorHits: List<Map<String, Any?>>,
+            query: String,
+        ): List<Map<String, Any?>> {
+            if (nameHits.isEmpty()) return vectorHits.distinctBy { it["content"] }
+            val names = nameHits.mapNotNull { it["name"] as? String }.toSet()
+            val scoped = vectorHits.filter { (it["name"] as? String) in names }
+            return filterBySection(nameHits + scoped, query).distinctBy { it["content"] }
+        }
+
+        /**
+         * Normalized (accent-stripped) query tokens → the vector_store categories they cue.
+         * "kit" spans the whole character kit; stat words ("elemento") pin the profile doc.
+         */
+        private val SECTION_CUES: Map<String, Set<String>> = listOf(
+            setOf("eidolon") to "eidolon eidolons",
+            setOf("skill") to "habilidade habilidades skill skills ultimate ultimato ult ulti " +
+                "talento talentos talent tecnica tecnicas technique basico basica ataque ataques",
+            setOf("trace") to "traco tracos trace traces passiva passivas passivo passivos",
+            // relic/cone words also pin a CHARACTER's build doc ("melhor cone pra acheron"):
+            // whichever category the anchored entity actually has is the one that survives.
+            setOf("light_cone", "build") to "cone cones lightcone lightcones",
+            setOf("relic_set", "build") to "reliquia reliquias relic relics set sets " +
+                "ornamento ornamentos ornament ornaments",
+            setOf("build") to "build builds time times equipe equipes team teams " +
+                "substat substats mainstat mainstats",
+            setOf("profile") to "elemento caminho path raridade",
+            setOf("profile", "skill", "trace", "eidolon") to "kit",
+        ).flatMap { (cats, words) -> words.split(' ').map { it to cats } }.toMap()
+
+        /**
+         * Narrows name-anchored [docs] to the kit section(s) the [query] asks about
+         * ("eidolon 2", "ultimate", "traço", "cone"...). No cue — or a cue that matches
+         * nothing this entity has — leaves the docs untouched, so filtering only ever raises
+         * precision, never causes a miss. An "e2"/"eidolon 2" query additionally narrows to
+         * that single eidolon's doc. Pure, so it's unit-testable without a vector store.
+         */
+        internal fun filterBySection(
+            docs: List<Map<String, Any?>>,
+            query: String,
+        ): List<Map<String, Any?>> {
+            if (docs.isEmpty()) return docs
+            val q = HsrCharacterService.normalize(query)
+            val eidolonNum = EIDOLON_NUM.find(q)?.groupValues?.get(1)
+            val cued = q.split(TOKEN_SEP).flatMap { SECTION_CUES[it].orEmpty() }.toMutableSet()
+            if (eidolonNum != null) cued += "eidolon"
+            if (cued.isEmpty()) return docs
+            val section = docs.filter { it["category"] in cued }.ifEmpty { return docs }
+            if (eidolonNum == null) return section
+            return section.filter {
+                it["category"] != "eidolon" ||
+                    (it["content"] as? String)?.contains("Eidolon $eidolonNum") == true
+            }.ifEmpty { section }
+        }
+
         /**
          * Entity names present whole-word in the query (accent/case-insensitive), same
          * matching contract as the character gazetteer: full name, ≥4 normalized chars — no

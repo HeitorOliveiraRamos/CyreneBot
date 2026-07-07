@@ -9,6 +9,7 @@ import com.cyrene.hsr.HsrCharacterService
 import com.cyrene.knowledge.AnswerCache
 import com.cyrene.knowledge.Grounding
 import com.cyrene.knowledge.KnowledgeGrounder
+import com.cyrene.skills.SkillTools
 import org.slf4j.LoggerFactory
 import org.springframework.ai.chat.client.ChatClient
 import org.springframework.ai.chat.messages.Message
@@ -18,6 +19,7 @@ import org.springframework.ai.chat.prompt.Prompt
 import org.springframework.ai.ollama.OllamaChatModel
 import org.springframework.ai.ollama.api.OllamaOptions
 import org.springframework.stereotype.Service
+import java.time.LocalDate
 
 /**
  * Orchestrates the bot's LLM access. Two named passes share the same underlying
@@ -49,6 +51,7 @@ class OllamaAiService(
     private val knowledgeGrounder: KnowledgeGrounder,
     private val characters: HsrCharacterService,
     private val answerCache: AnswerCache,
+    private val skillTools: SkillTools,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -61,12 +64,18 @@ class OllamaAiService(
      *
      * Returns the voice pass output. If the voice pass produces blank text, falls back to
      * the brain output so the user is never left with an empty reply.
+     *
+     * [progress] receives user-facing status lines ([BotMessages.STATUS_KNOWLEDGE] etc.) as
+     * the pipeline crosses stage boundaries, so the listener can show what is happening
+     * while a slow local generation runs. The CHAT fast path emits nothing — it's quick and
+     * the typing indicator already covers it.
      */
     fun chatBrainAndVoice(
         history: List<ConversationMessage>,
         toolContext: DiscordToolContext,
         extraSystemPrompt: String? = null,
         userName: String? = null,
+        progress: (String) -> Unit = {},
     ): String {
         // Intent gate: cheap, tool-less, deterministic pre-pass. When the last user turn
         // is purely conversational ("oi", "te amo", "qual seu nome?"), we short-circuit
@@ -87,13 +96,15 @@ class OllamaAiService(
         // (retrieve → abstain-or-retell), so the model can't skip the source or invent when it
         // comes back empty. The brain+voice path below now serves MODERATION only.
         if (intent == Intent.KNOWLEDGE) {
-            return runKnowledgePipeline(history, extraSystemPrompt, userName)
+            return runKnowledgePipeline(history, extraSystemPrompt, userName, progress)
         }
 
+        progress(BotMessages.STATUS_MODERATION)
         val brainOutput = runBrainPass(history, toolContext, extraSystemPrompt)
         if (log.isDebugEnabled) {
             log.debug("Brain output ({} chars): {}", brainOutput.length, brainOutput.take(500))
         }
+        progress(BotMessages.STATUS_WRITING)
         return runVoicePass(history, brainOutput, extraSystemPrompt, userName, intent).ifBlank {
             log.warn("Voice pass produced blank output; falling back to brain output.")
             brainOutput
@@ -110,7 +121,7 @@ class OllamaAiService(
         val history = listOf(
             ConversationMessage(conversationId = 0L, role = MessageRole.USER, content = question),
         )
-        return runKnowledgePipeline(history, extraSystemPrompt = null, userName = userName)
+        return runKnowledgePipeline(history, extraSystemPrompt = null, userName = userName, progress = {})
     }
 
     /**
@@ -128,6 +139,7 @@ class OllamaAiService(
         history: List<ConversationMessage>,
         extraSystemPrompt: String?,
         userName: String?,
+        progress: (String) -> Unit,
     ): String {
         val question = history.lastOrNull { it.role == MessageRole.USER }?.content?.trim().orEmpty()
         val searchQuery = condenseFollowUp(history, question)
@@ -141,7 +153,10 @@ class OllamaAiService(
             return it
         }
 
-        val grounding = metrics.timePass("knowledge_retrieve") { knowledgeGrounder.ground(searchQuery) }
+        progress(BotMessages.STATUS_KNOWLEDGE)
+        val grounding = metrics.timePass("knowledge_retrieve") {
+            knowledgeGrounder.ground(searchQuery) { progress(BotMessages.STATUS_WEB) }
+        }
 
         if (!grounding.found) {
             metrics.count("cyrene.knowledge", "result", "abstain")
@@ -149,14 +164,29 @@ class OllamaAiService(
             return BotMessages.knowledgeMiss(userName)
         }
 
-        val answer = runVoicePassKnowledge(history, grounding.context, extraSystemPrompt, userName)
-            .ifBlank { return BotMessages.knowledgeMiss(userName) }
+        progress(BotMessages.STATUS_WRITING)
+        var answer = runVoicePassKnowledge(history, grounding.context, extraSystemPrompt, userName)
+
+        // Language guard: CJK-heavy source chunks make the voice model drift into Chinese
+        // mid-answer, and the persona's "PT-BR only" rule can't win against a context that
+        // is mostly CJK. Drift is stochastic, so one re-roll usually lands in PT-BR; if it
+        // drifts twice we abstain rather than reply in the wrong language. Deterministic
+        // check — the grounding judge can't catch this (a CN answer matches a CN source).
+        if (hasCjk(answer)) {
+            metrics.count("cyrene.knowledge", "result", "language_retry")
+            log.debug("Knowledge answer drifted into CJK for '{}'; re-rolling voice pass", question)
+            answer = runVoicePassKnowledge(history, grounding.context, extraSystemPrompt, userName)
+        }
+        if (answer.isBlank() || hasCjk(answer)) {
+            metrics.count("cyrene.knowledge", "result", "language_abstain")
+            return BotMessages.knowledgeMiss(userName)
+        }
 
         // Web answers are the embellishment-prone ones (raw page text, less structured than the KB),
         // so a cheap judge checks the draft against the source. Fail-open on any error: a flaky judge
         // must never silence a genuinely-grounded reply.
         if (grounding.source == Grounding.Source.WEB && properties.knowledge.verifyWebAnswers) {
-            if (!isGrounded(answer, grounding.context)) {
+            if (!isGrounded(question, answer, grounding.context)) {
                 metrics.count("cyrene.knowledge", "result", "unverified")
                 log.debug("Knowledge verify rejected a web answer for '{}'", question)
                 return BotMessages.knowledgeMiss(userName)
@@ -205,10 +235,13 @@ class OllamaAiService(
      * budget, temp 0 — it only emits "sim"/"nao". Returns true on any failure (parse error, exception)
      * so the worst case is a missed catch, never a wrongly-suppressed good answer.
      */
-    private fun isGrounded(answer: String, context: String): Boolean {
+    private fun isGrounded(question: String, answer: String, context: String): Boolean {
         val messages = listOf(
             SystemMessage(VERIFY_INSTRUCTIONS),
-            UserMessage("CONTEXTO:\n$context\n\nRESPOSTA:\n$answer\n\nVeredito:"),
+            UserMessage(
+                "DATA DE HOJE: ${LocalDate.now()}\n\nPERGUNTA DO USUÁRIO:\n$question\n\n" +
+                    "CONTEXTO:\n$context\n\nRESPOSTA:\n$answer\n\nVeredito:",
+            ),
         )
         return try {
             val raw = metrics.timePass("knowledge_verify") {
@@ -255,8 +288,12 @@ class OllamaAiService(
         }
         metrics.count("cyrene.llm.fastpath", "result", "miss")
 
+        // Skill requests must reach the tool-aware brain (the only pass with loadSkill),
+        // so the gate learns to classify them as "mod". No skills = unchanged gate prompt.
+        val gateSystem = listOfNotNull(INTENT_GATE_INSTRUCTIONS, skillTools.gateSuffix())
+            .joinToString("\n\n")
         val messages = listOf(
-            SystemMessage(INTENT_GATE_INSTRUCTIONS),
+            SystemMessage(gateSystem),
             UserMessage("Mensagem: $lastUser\nResposta:"),
         )
         return try {
@@ -296,6 +333,7 @@ class OllamaAiService(
             extraSystemPrompt?.takeIf { it.isNotBlank() },
             BRAIN_INSTRUCTIONS,
             TOOL_USAGE_RULES,
+            skillTools.catalogPrompt(),
         ).joinToString("\n\n")
 
         val messages = promptBuilder.build(history, brainSystem, overrideOnly = true)
@@ -440,6 +478,9 @@ class OllamaAiService(
             dados em personagem, em PT-BR, de forma COMPLETA e bem organizada.
 
             Regras desta etapa (têm prioridade sobre o limite de tamanho da sua persona):
+            - DATA DE HOJE: ${LocalDate.now()}. Perguntas sobre "versão/patch/banner atual"
+              ou "já lançou?" se resolvem comparando as datas que aparecem nos dados com a
+              data de hoje (algo com data futura ainda NÃO está ativo).
             - O limite de "1 a 3 frases" NÃO se aplica a esta resposta. Aqui você PODE e
               DEVE ser detalhada: use vários parágrafos e/ou listas por tópico.
             - Repasse TODOS os detalhes relevantes dos dados: nomes de habilidades, tipo
@@ -447,6 +488,10 @@ class OllamaAiService(
               efeitos, energia, traces, Eidolons — sem cortar nem resumir o que veio.
             - Use SOMENTE os dados fornecidos abaixo. NÃO complete de memória. Se um campo
               não veio nos dados, simplesmente não fale dele.
+            - Os dados podem chegar em inglês ou chinês: TRADUZA tudo para português
+              brasileiro. NUNCA copie trechos em outro idioma na resposta — nomes próprios
+              de habilidades/cones podem ficar em inglês, mas descrições e efeitos devem
+              estar 100% em PT-BR.
             - Organize com tópicos ("- " ou "• ") e títulos curtos em **negrito** por
               habilidade. Markdown do Discord é suportado.
             - Mantenha um toque do seu jeito — um vocativo carinhoso no começo e/ou no fim —
@@ -732,6 +777,15 @@ class OllamaAiService(
         /** Strips a leading "[name]: " speaker tag that the mention path prepends to turns. */
         private val SPEAKER_PREFIX = Regex("^\\[[^\\]]*]:\\s*")
 
+        private val CJK = Regex("[\\p{IsHan}\\p{IsHiragana}\\p{IsKatakana}\\p{IsHangul}]")
+
+        /**
+         * True when [text] contains ANY CJK character. A PT-BR answer about HSR never needs
+         * one (skill/cone proper nouns are Latin-script), so a single Han/Kana/Hangul char
+         * is a reliable signal the voice drifted into the source language. Pure.
+         */
+        internal fun hasCjk(text: String): Boolean = CJK.containsMatchIn(text)
+
         /**
          * Exact-match whitelist of obviously-conversational openers that need no LLM
          * classification. Kept deliberately tight: anything not listed here falls through to
@@ -888,14 +942,25 @@ class OllamaAiService(
          * in the context counts as unsupported, so an embellished/invented stat fails.
          */
         val VERIFY_INSTRUCTIONS = """
-            Você é um verificador de fidelidade. Recebe um CONTEXTO (dados de fonte) e uma
-            RESPOSTA. Sua tarefa: decidir se TODA afirmação factual da RESPOSTA (nomes,
-            elementos, caminhos, habilidades, números, efeitos) está sustentada pelo CONTEXTO.
+            Você é um verificador de fidelidade. Recebe a PERGUNTA do usuário, um CONTEXTO
+            (dados de fonte) e uma RESPOSTA. Sua tarefa: decidir se as afirmações factuais
+            da RESPOSTA (nomes, elementos, caminhos, habilidades, números, efeitos) estão
+            sustentadas pelo CONTEXTO.
 
-            - Se algo na RESPOSTA NÃO aparece no CONTEXTO (foi inventado ou contradiz a fonte),
-              o veredito é "nao".
-            - Se tudo na RESPOSTA está apoiado no CONTEXTO, o veredito é "sim".
+            - Se a RESPOSTA CONTRADIZ o CONTEXTO ou INVENTA dados que não aparecem nele
+              (habilidades, números, datas, personagens), o veredito é "nao".
+            - Se as afirmações da RESPOSTA estão apoiadas no CONTEXTO, o veredito é "sim".
+            - O CONTEXTO pode estar em INGLÊS ou outro idioma e a RESPOSTA em português:
+              traduções e paráfrases fiéis CONTAM como sustentadas.
+            - Nomes/termos que o usuário usou na PERGUNTA podem reaparecer na RESPOSTA mesmo
+              que o CONTEXTO chame a mesma coisa de outro nome (apelido, nome vazado, nome
+              localizado) — isso NÃO reprova.
+            - A RESPOSTA pode cobrir só uma parte do CONTEXTO — omissão NÃO reprova.
+            - Deduções DIRETAS do CONTEXTO contam como apoiadas — ex.: se o CONTEXTO diz que
+              uma versão lança numa data posterior à DATA DE HOJE, afirmar que a versão atual
+              é a anterior está sustentado.
             - Vocativos, saudações e tom carinhoso NÃO contam como afirmação factual — ignore-os.
+            - Na DÚVIDA, responda "sim" — reprove apenas invenção ou contradição CLARA.
 
             Responda APENAS com JSON neste formato: {"veredito": "sim"} ou {"veredito": "nao"}.
             Nada mais.

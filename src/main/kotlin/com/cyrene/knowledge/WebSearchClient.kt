@@ -73,12 +73,18 @@ class WebSearchClient(
      * Runs a search scoped to Honkai: Star Rail. Returns up to [limit] results, or an empty
      * list when web search is disabled or the request fails (failures are logged, never
      * thrown — a flaky search must not break a chat turn).
+     *
+     * [recent] marks a news-shaped query (announcements, leaks, "novo X"): SearXNG gets
+     * `time_range=month` so fresh pages outrank stale SEO guides, and one extra page is
+     * fetched with a proportionally smaller per-page cap — the total char budget (and thus
+     * the num_ctx sizing) stays the same, it's just spread across more sources.
      */
-    fun search(query: String, limit: Int = 5): List<WebSearchResult> {
+    fun search(query: String, limit: Int = 5, recent: Boolean = false): List<WebSearchResult> {
         val root = baseUrl ?: return emptyList()
         val scoped = "Honkai Star Rail $query"
+        val timeRange = if (recent) "&time_range=month" else ""
         val uri = URI.create(
-            "$root/search?q=${URLEncoder.encode(scoped, StandardCharsets.UTF_8)}&format=json&safesearch=0",
+            "$root/search?q=${URLEncoder.encode(scoped, StandardCharsets.UTF_8)}&format=json&safesearch=0$timeRange",
         )
         val request = HttpRequest.newBuilder(uri)
             .timeout(Duration.ofSeconds(12))
@@ -94,7 +100,13 @@ class WebSearchClient(
                 log.warn("SearXNG returned HTTP {} for query '{}'", response.statusCode(), query)
                 return emptyList()
             }
-            enrichWithPageText(parse(response.body(), limit))
+            // News queries spread the same total char budget across one more page, so a
+            // third source (often the actual announcement) gets read without growing the
+            // prompt the voice/verify passes must fit in num_ctx.
+            val basePages = properties.knowledge.webFetchPages
+            val pages = if (recent) basePages + 1 else basePages
+            val charLimit = properties.knowledge.webFetchCharLimit * basePages / pages
+            enrichWithPageText(parse(response.body(), limit), pages, charLimit)
         } catch (e: Exception) {
             log.warn("Web search failed for query '{}': {}", query, e.message)
             emptyList()
@@ -125,10 +137,8 @@ class WebSearchClient(
      * connection can't stall the whole knowledge turn. Any page that times out, errors, or
      * isn't HTML is simply left snippet-only.
      */
-    private fun enrichWithPageText(results: List<WebSearchResult>): List<WebSearchResult> {
-        val pages = properties.knowledge.webFetchPages
+    private fun enrichWithPageText(results: List<WebSearchResult>, pages: Int, charLimit: Int): List<WebSearchResult> {
         if (pages <= 0 || results.isEmpty()) return results
-        val charLimit = properties.knowledge.webFetchCharLimit
 
         return metrics.timePass("web_fetch") {
             // Kick off all fetches up front so they overlap, then collect their results in order.
@@ -155,7 +165,7 @@ class WebSearchClient(
      */
     private fun fetchReadableTextAsync(url: String, charLimit: Int): CompletableFuture<String> {
         return try {
-            val request = HttpRequest.newBuilder(URI.create(url))
+            val request = HttpRequest.newBuilder(URI.create(fetchableUrl(url)))
                 .timeout(Duration.ofSeconds(8))
                 // A real-browser UA: many fan wikis 403 the default Java UA.
                 .header("User-Agent", "Mozilla/5.0 (compatible; CyreneBot/1.0; +discord)")
@@ -205,6 +215,17 @@ class WebSearchClient(
 
         /** Non-content elements dropped before text extraction. */
         const val STRIP_SELECTOR = "script, style, noscript, svg, head, nav, footer, form, template"
+
+        private val REDDIT_HOST = Regex("^(https?://)(www\\.)?reddit\\.com/", RegexOption.IGNORE_CASE)
+
+        /**
+         * Rewrites the URL to a variant our plain-HTTP fetcher can actually read. Today that's
+         * one case: new reddit (`www.reddit.com`) serves a JS shell with no post content, while
+         * `old.reddit.com` is server-rendered HTML — and leak/announcement threads rank high
+         * for exactly the news queries we care about. Pure.
+         */
+        internal fun fetchableUrl(url: String): String =
+            REDDIT_HOST.replace(url) { m -> "${m.groupValues[1]}old.reddit.com/" }
 
         /** Tags whose close should produce a line break, so kit sections don't run together. */
         val BLOCK_TAGS = setOf(

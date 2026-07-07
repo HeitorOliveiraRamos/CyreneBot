@@ -53,6 +53,16 @@ object BotMessages {
             "recuso a chutar nota 😌 Tenta de novo depois da próxima atualização da tabela."
 
     /**
+     * Live pipeline status lines. Shown while a reply is being produced — the listener posts
+     * the first one as a reply and edits it in place as stages advance, then deletes it when
+     * the real answer lands. Operational copy, not persona output.
+     */
+    const val STATUS_KNOWLEDGE = "🔎 Deixa eu procurar na minha base de conhecimento…"
+    const val STATUS_WEB = "🌐 Não tinha tudo na base, pesquisando na internet…"
+    const val STATUS_MODERATION = "🛠️ Deixa comigo, já estou cuidando disso…"
+    const val STATUS_WRITING = "✍️ Só um instante, organizando a resposta…"
+
+    /**
      * HSR knowledge question where no real source (local base nor web) backed the answer.
      * Sent INSTEAD of letting the model invent — abstaining beats a confident wrong kit.
      * Static (no LLM call) so the abstain path stays fast.

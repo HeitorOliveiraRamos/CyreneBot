@@ -38,6 +38,11 @@ data class BotProperties(
     val performance: Performance = Performance(),
     val knowledge: Knowledge = Knowledge(),
     /**
+     * Directory of skill files (one .md per skill) for [com.cyrene.skills.SkillTools].
+     * Relative to the working directory. Missing directory = feature off.
+     */
+    val skillsDir: String = "skills",
+    /**
      * When set to a non-blank Discord channel ID, the message listeners
      * ([com.cyrene.discord.listener.MentionReplyListener] and
      * [com.cyrene.discord.listener.ChatSessionListener]) ignore messages from any other

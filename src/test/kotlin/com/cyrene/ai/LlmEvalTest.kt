@@ -96,29 +96,59 @@ class LlmEvalTest {
         Ultimate: Chuva Carmesim — causa dano de Raio igual a 371% do ATQ distribuído em golpes.
     """.trimIndent()
 
-    /** (answer, shouldPass) — answers the judge must accept or reject against [kitContext]. */
-    private val verifyCases: List<Pair<String, Boolean>> = listOf(
+    /** English leak article, mirroring the web tier's real output for news questions. */
+    private val enLeakContext = """
+        [Honkai Star Rail leaks point to Aventurine SP and Robin SP for 4.5–4.7] (https://example.com/leaks)
+        Leaks describe the five-star characters expected across versions 4.5 and 4.6. The leaked
+        roster is Aventurine SP on the Elation Path and Robin SP on the Remembrance Path — alternate
+        "SP" versions of existing characters, not new identities. Aventurine - Waveflair was teased
+        on Honkai: Star Rail's official social media and will likely release in Phase 2 of Version 4.5.
+        Nothing here is official; names and version windows can shift before HoYoverse confirms.
+    """.trimIndent()
+
+    private data class VerifyCase(val question: String, val context: String, val answer: String, val expected: Boolean)
+
+    /** Answers the judge must accept or reject given the question and source context. */
+    private val verifyCases: List<VerifyCase> = listOf(
         // Faithful retell → sim
-        "Acheron é do elemento Raio, caminho do Niilismo. Sua skill Trilha do Trovão causa 160% do ATQ." to true,
+        VerifyCase("qual o kit da Acheron?", kitContext, "Acheron é do elemento Raio, caminho do Niilismo. Sua skill Trilha do Trovão causa 160% do ATQ.", true),
         // Faithful subset with persona vocative → sim (vocatives must not count as claims)
-        "Meu bem, a Acheron é do Raio e segue o caminho do Niilismo!" to true,
+        VerifyCase("quem é a Acheron?", kitContext, "Meu bem, a Acheron é do Raio e segue o caminho do Niilismo!", true),
         // Contradicts the element → nao
-        "Acheron é do elemento Gelo, caminho do Niilismo." to false,
+        VerifyCase("quem é a Acheron?", kitContext, "Acheron é do elemento Gelo, caminho do Niilismo.", false),
         // Invented multiplier → nao
-        "A ultimate Chuva Carmesim causa 800% do ATQ." to false,
+        VerifyCase("qual a ult da Acheron?", kitContext, "A ultimate Chuva Carmesim causa 800% do ATQ.", false),
         // Invented ability that isn't in the source → nao
-        "Acheron tem a técnica Lâmina Fantasma que congela todos os inimigos por 3 turnos." to false,
+        VerifyCase("o que a Acheron faz?", kitContext, "Acheron tem a técnica Lâmina Fantasma que congela todos os inimigos por 3 turnos.", false),
+        // PT-BR retell of an ENGLISH source, echoing the question's leak-name → sim
+        // (the reported failure: judge rejected a faithful answer because the context says
+        // "Robin SP" while the user asked about "Robin Sumeretto", and the source is EN)
+        VerifyCase(
+            "o que temos de disponível da Robin Sumeretto? Personagem que vai lançar na 4.6",
+            enLeakContext,
+            "Amor, a Robin Sumeretto é uma versão alternativa da Robin, no caminho da Rememoração " +
+                "(Remembrance), prevista para a 4.5 ou 4.6 — mas ainda não é oficial, tá?",
+            true,
+        ),
+        // Same EN source, but the answer invents path and availability → nao
+        VerifyCase(
+            "o que temos de disponível da Robin Sumeretto?",
+            enLeakContext,
+            "A Robin Sumeretto é do caminho da Erudição e já está disponível no banner atual.",
+            false,
+        ),
     )
 
     @Test
     fun `grounding judge accuracy`() {
-        val results = verifyCases.map { (answer, expected) ->
+        val results = verifyCases.map { c ->
             val raw = ask(
                 OllamaAiService.VERIFY_INSTRUCTIONS,
-                "CONTEXTO:\n$kitContext\n\nRESPOSTA:\n$answer\n\nVeredito:",
+                "DATA DE HOJE: 2026-07-07\n\nPERGUNTA DO USUÁRIO:\n${c.question}\n\n" +
+                    "CONTEXTO:\n${c.context}\n\nRESPOSTA:\n${c.answer}\n\nVeredito:",
                 numPredict = 24,
             )
-            Triple(answer.take(60), expected, OllamaAiService.parseVerdict(raw))
+            Triple(c.answer.take(60), c.expected, OllamaAiService.parseVerdict(raw))
         }
         val accuracy = report("GROUNDING JUDGE [$model]", results)
         assertTrue(accuracy >= 0.8, "grounding judge accuracy $accuracy < 0.8")

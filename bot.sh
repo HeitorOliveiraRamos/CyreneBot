@@ -241,7 +241,9 @@ cmd_logs() { tail -f "$LOG_FILE"; }
 cmd_reindex() {
   require_env; resolve_java
   start_postgres; start_ollama
-  [ -f "$JAR" ] || build || return 1
+  # Sempre recompila: reindex com jar velho embeda o conjunto de docs ANTIGO e a versão
+  # do nanoka não muda — o auto-reindex nunca corrige (aconteceu 2026-07-07).
+  build || return 1
   local was_running=0; bot_running && was_running=1 && stop_bot
   step "Reindex da base HSR (HSR_REINDEX=true)"
   local rlog="$LOG_DIR/reindex.log"

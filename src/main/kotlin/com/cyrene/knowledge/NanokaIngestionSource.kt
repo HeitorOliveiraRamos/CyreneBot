@@ -1,6 +1,7 @@
 package com.cyrene.knowledge
 
 import com.cyrene.config.BotProperties
+import com.cyrene.hsr.BuildAnalyzer
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.slf4j.LoggerFactory
@@ -23,8 +24,13 @@ import kotlin.math.roundToInt
  * unless [BotProperties.Knowledge.nanokaVersion] pins one.
  *
  * Four datasets are flattened into self-contained [Document]s, mirroring the metadata shape
- * (`category` + `name`) that `GameKnowledgeTools.lookupHsr` expects:
- *  - **profile** / **skill** / **eidolon** — per character (kit from `en/character/{id}.json`).
+ * (`category` + `name`) that `GameKnowledgeTools.lookupHsr` expects. Character-kit docs also
+ * carry `character_id` (the game id, same key as `hsr_character.id`) so every chunk is linked
+ * to its character row:
+ *  - **profile** / **skill** / **eidolon** / **trace** / **build** — per character (kit from
+ *    `en/character/{id}.json`; traces are the A2/A4/A6 bonus abilities in `skill_trees`,
+ *    the nodes with a `point_desc` — minor stat nodes have none and are skipped; the build is
+ *    the recommended relics/cones/stats/team, id lists resolved against the index files).
  *  - **relic_set** — relic & planar-ornament set bonuses (`relicset.json`).
  *  - **enemy** — monsters with weaknesses (`monster.json`).
  *  - **light_cone** — light cones with their superimposed passive (`en/lightcone/{id}.json`).
@@ -32,7 +38,7 @@ import kotlin.math.roundToInt
  * Ability descriptions carry `#N[fmt]%` placeholders filled from a per-level `param_list`;
  * [fill] substitutes the max-level values so the model sees real multipliers, not `#1[i]%`.
  *
- * Intentionally skipped (kept lazy / low-noise): trace trees (mostly null text + internal ids),
+ * Intentionally skipped (kept lazy / low-noise): minor stat trace nodes (no text),
  * voicelines/stories (bulk lore that dilutes kit retrieval), numeric stat tables, and the
  * recommended-build id lists (ambiguous id→name mapping — add once verified). The character's
  * short bio is kept as lore-lite. Failures on any one fetch are logged and skipped so a single
@@ -60,11 +66,16 @@ class NanokaIngestionSource(
         val base = "${properties.knowledge.nanokaCdnUrl.trimEnd('/')}/$version"
         log.info("Nanoka: ingesting HSR data version {} from {}", version, base)
 
+        // relicset.json / lightcone.json are fetched once: they yield their own documents AND
+        // resolve the id lists inside each character's recommended build.
+        val relicIndex = getJson("$base/relicset.json")
+        val coneIndex = getJson("$base/lightcone.json")
+
         val docs = mutableListOf<Document>()
-        docs += characters(base)
-        docs += relicSets(base)
+        docs += characters(base, enNames(relicIndex), enNames(coneIndex))
+        docs += relicSets(relicIndex)
         docs += enemies(base)
-        docs += lightCones(base)
+        docs += lightCones(base, coneIndex)
         log.info("Nanoka: built {} documents total", docs.size)
         return docs
     }
@@ -86,8 +97,13 @@ class NanokaIngestionSource(
 
     // -------------------- characters -------------------- //
 
-    private fun characters(base: String): List<Document> {
+    private fun characters(
+        base: String,
+        relicNames: Map<String, String>,
+        coneNames: Map<String, String>,
+    ): List<Document> {
         val index = getJson("$base/character.json") ?: return emptyList()
+        val charNames = enNames(index)
         val docs = mutableListOf<Document>()
         var withKit = 0
         for ((id, meta) in index.fields()) {
@@ -96,8 +112,10 @@ class NanokaIngestionSource(
             docs += profileDoc(id, name, meta)
 
             val detail = getJson("$base/en/character/$id.json") ?: continue
-            children(detail.path("skills")).forEach { sk -> skillDoc(name, sk)?.let { docs += it } }
-            children(detail.path("ranks")).forEachIndexed { i, rk -> eidolonDoc(name, i + 1, rk)?.let { docs += it } }
+            children(detail.path("skills")).forEach { sk -> skillDoc(name, id, sk)?.let { docs += it } }
+            children(detail.path("ranks")).forEachIndexed { i, rk -> eidolonDoc(name, id, i + 1, rk)?.let { docs += it } }
+            children(detail.path("skill_trees")).forEach { pt -> traceDoc(name, id, pt)?.let { docs += it } }
+            buildDoc(name, id, detail, relicNames, coneNames, charNames)?.let { docs += it }
             withKit++
         }
         log.info("Nanoka: {} character profiles ({} with full kits)", index.size(), withKit)
@@ -115,28 +133,91 @@ class NanokaIngestionSource(
         return Document(text, metaOf("profile", name, id))
     }
 
-    private fun skillDoc(charName: String, sk: JsonNode): Document? {
+    private fun skillDoc(charName: String, id: String, sk: JsonNode): Document? {
         val skillName = sk.path("name").asText("").trim()
         val rawDesc = sk.path("desc").asText("").ifBlank { sk.path("simple_desc").asText("") }
         if (skillName.isEmpty() && rawDesc.isBlank()) return null
         val desc = fill(rawDesc, maxLevelParams(sk.path("level")))
         val type = sk.path("type_name").asText("").trim()
         val header = "$charName — habilidade: $skillName" + if (type.isNotEmpty()) " ($type)" else ""
-        return Document(listOf(header, desc).filter { it.isNotBlank() }.joinToString("\n"), metaOf("skill", charName))
+        return Document(listOf(header, desc).filter { it.isNotBlank() }.joinToString("\n"), metaOf("skill", charName, id))
     }
 
-    private fun eidolonDoc(charName: String, n: Int, rk: JsonNode): Document? {
+    private fun eidolonDoc(charName: String, id: String, n: Int, rk: JsonNode): Document? {
         val rawDesc = rk.path("desc").asText("").trim()
         if (rawDesc.isEmpty()) return null
         val name = rk.path("name").asText("").trim()
         val desc = fill(rawDesc, paramList(rk.path("param_list")))
-        return Document("$charName — Eidolon $n: $name\n$desc".trim(), metaOf("eidolon", charName))
+        return Document("$charName — Eidolon $n: $name\n$desc".trim(), metaOf("eidolon", charName, id))
+    }
+
+    /**
+     * A2/A4/A6 bonus ability from a `skill_trees` node. Only the level-"1" entry exists for
+     * these (majors don't level); minor stat nodes carry no `point_desc` and return null.
+     */
+    private fun traceDoc(charName: String, id: String, pt: JsonNode): Document? {
+        val node = pt.path("1")
+        val rawDesc = node.path("point_desc").asText("").trim()
+        if (rawDesc.isEmpty()) return null
+        val name = node.path("point_name").asText("").trim()
+        val desc = fill(rawDesc, paramList(node.path("param_list")))
+        return Document("$charName — traço maior (Bonus Ability): $name\n$desc".trim(), metaOf("trace", charName, id))
+    }
+
+    /**
+     * The character's recommended build from the same detail JSON as the kit. Relic/ornament
+     * sets, light cones and team members come as id lists ordered best-first — resolved
+     * against the index-file name maps; ids that don't resolve are skipped, never rendered
+     * raw. Main/sub stats are game property keys, labelled via [BuildAnalyzer.statPt].
+     * Null when there's nothing to recommend (id lists empty or none resolved).
+     */
+    internal fun buildDoc(
+        charName: String,
+        id: String,
+        detail: JsonNode,
+        relicNames: Map<String, String>,
+        coneNames: Map<String, String>,
+        charNames: Map<String, String>,
+    ): Document? {
+        val relics = detail.path("relics")
+        val four = namesOf(relics.path("set4_id_list"), relicNames)
+        val two = namesOf(relics.path("set2_id_list"), relicNames)
+        val cones = namesOf(detail.path("lightcones"), coneNames)
+        if (four.isEmpty() && cones.isEmpty()) return null
+        val mains = relics.path("property_list").mapNotNull { p ->
+            SLOT_PT[p.path("relic_type").asText("")]?.let { slot ->
+                "$slot: ${BuildAnalyzer.statPt(p.path("property_type").asText(""))}"
+            }
+        }
+        val subs = relics.path("sub_affix_property_list").map { BuildAnalyzer.statPt(it.asText("")) }
+        val team = namesOf(detail.path("teams").path(0).path("member_list"), charNames)
+        val text = buildString {
+            append("$charName — build recomendada (Honkai: Star Rail).\n")
+            if (four.isNotEmpty()) append("Relíquias (4 peças, melhor primeiro): ${four.joinToString("; ")}\n")
+            if (two.isNotEmpty()) append("Ornamento Planar (melhor primeiro): ${two.joinToString("; ")}\n")
+            if (cones.isNotEmpty()) append("Cone de Luz (melhor primeiro): ${cones.joinToString("; ")}\n")
+            if (mains.isNotEmpty()) append("Main stats: ${mains.joinToString(", ")}\n")
+            if (subs.isNotEmpty()) append("Substats (prioridade): ${subs.joinToString(" > ")}\n")
+            if (team.isNotEmpty()) append("Time recomendado: ${(listOf(charName) + team).joinToString(", ")}\n")
+        }.trim()
+        return Document(text, metaOf("build", charName, id))
+    }
+
+    /** Ids from a JSON array resolved to names; unresolved ids are dropped. */
+    private fun namesOf(ids: JsonNode, names: Map<String, String>): List<String> =
+        ids.mapNotNull { names[it.asText()] }
+
+    /** id → English name from an index file (character/relicset/lightcone .json). */
+    private fun enNames(index: JsonNode?): Map<String, String> = buildMap {
+        index?.fields()?.forEach { (id, meta) ->
+            meta.path("en").asText("").trim().takeIf { it.isNotEmpty() }?.let { put(id, it) }
+        }
     }
 
     // -------------------- relic / ornament sets -------------------- //
 
-    private fun relicSets(base: String): List<Document> {
-        val sets = getJson("$base/relicset.json") ?: return emptyList()
+    private fun relicSets(sets: JsonNode?): List<Document> {
+        if (sets == null) return emptyList()
         val docs = mutableListOf<Document>()
         for ((_, s) in sets.fields()) {
             val name = s.path("en").asText("").trim()
@@ -189,8 +270,8 @@ class NanokaIngestionSource(
 
     // -------------------- light cones -------------------- //
 
-    private fun lightCones(base: String): List<Document> {
-        val index = getJson("$base/lightcone.json") ?: return emptyList()
+    private fun lightCones(base: String, index: JsonNode?): List<Document> {
+        if (index == null) return emptyList()
         val docs = mutableListOf<Document>()
         for ((id, meta) in index.fields()) {
             val name = meta.path("en").asText("").trim()
@@ -264,6 +345,12 @@ class NanokaIngestionSource(
             "Mage" to "Erudição (Erudition)", "Shaman" to "Harmonia (Harmony)",
             "Warlock" to "Inexistência (Nihility)", "Knight" to "Preservação (Preservation)",
             "Priest" to "Abundância (Abundance)", "Memory" to "Recordação (Remembrance)",
+        )
+
+        /** Variable-main-stat relic slots → PT labels. HEAD/HAND mains are fixed — skipped. */
+        private val SLOT_PT = mapOf(
+            "BODY" to "Corpo", "FOOT" to "Pés",
+            "NECK" to "Esfera Planar", "OBJECT" to "Corda de Conexão",
         )
 
         /** Combat types → PT (EN). `Thunder` is the internal name for the Lightning element. */

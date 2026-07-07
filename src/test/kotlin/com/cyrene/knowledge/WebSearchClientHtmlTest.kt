@@ -74,4 +74,19 @@ class WebSearchClientHtmlTest {
     fun `htmlToText folds non-breaking spaces into ordinary spaces`() {
         assertEquals("a b", WebSearchClient.htmlToText("<p>a&nbsp;b</p>"))
     }
+
+    @Test
+    fun `fetchableUrl rewrites new reddit to the server-rendered old reddit`() {
+        assertEquals(
+            "https://old.reddit.com/r/HonkaiStarRail_leaks/comments/abc/post/",
+            WebSearchClient.fetchableUrl("https://www.reddit.com/r/HonkaiStarRail_leaks/comments/abc/post/"),
+        )
+        assertEquals("http://old.reddit.com/r/x", WebSearchClient.fetchableUrl("http://reddit.com/r/x"))
+        // Already-old reddit and unrelated hosts pass through untouched.
+        assertEquals("https://old.reddit.com/r/x", WebSearchClient.fetchableUrl("https://old.reddit.com/r/x"))
+        assertEquals(
+            "https://honkai-star-rail.fandom.com/wiki/Aventurine",
+            WebSearchClient.fetchableUrl("https://honkai-star-rail.fandom.com/wiki/Aventurine"),
+        )
+    }
 }
