@@ -22,6 +22,7 @@
         <spring-ai.version>1.0.0</spring-ai.version>
         <jda.version>5.5.1</jda.version>
         <jsoup.version>1.18.3</jsoup.version>
+        <twelvemonkeys.version>3.12.0</twelvemonkeys.version>
     </properties>
 
     <dependencyManagement>
@@ -122,6 +123,14 @@
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-core</artifactId>
+        </dependency>
+
+        <!-- ImageIO webp reader: Ollama's decoder only does png/jpeg/gif, so VisionService
+             transcodes webp (Discord's default for many pastes) to png before inference. -->
+        <dependency>
+            <groupId>com.twelvemonkeys.imageio</groupId>
+            <artifactId>imageio-webp</artifactId>
+            <version>${twelvemonkeys.version}</version>
         </dependency>
 
         <!-- Test -->

@@ -62,10 +62,11 @@ bot:
   # Voice pass: rewrites the brain's output as Cyrene in persona. No tool callbacks
   # are attached to this pass.
   voice-model-name: ${VOICE_MODEL_NAME:llama3.1}
-  # Vision pass: extracts image-attachment content as text before the normal pipeline
-  # (build screenshots, relics, etc.). Needs a vision-capable Ollama model, e.g.
-  # `ollama pull qwen2.5vl` (or llava, llama3.2-vision). Blank = disabled, images ignored.
-  vision-model-name: ${VISION_MODEL_NAME:}
+  # Vision pass: extracts any image attachment's content as text before the normal
+  # pipeline (works for general images, not just HSR — HSR screenshots just get extra
+  # transcription care in the prompt). Needs a vision-capable Ollama model already
+  # pulled. Set VISION_MODEL_NAME= (blank) to disable and ignore images as before.
+  vision-model-name: ${VISION_MODEL_NAME:qwen2.5vl}
   # Ollama inference tuning. These are applied at every call site by OllamaAiService
   # because per-prompt OllamaOptions replace Spring AI's chat.options defaults.
   # num-ctx default (16384) is sized for the knowledge path's web-fetch budget (see

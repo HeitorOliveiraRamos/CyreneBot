@@ -12,7 +12,10 @@ import org.springframework.core.io.ByteArrayResource
 import org.springframework.stereotype.Service
 import org.springframework.util.MimeType
 import org.springframework.util.MimeTypeUtils
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
+import javax.imageio.ImageIO
 
 /**
  * Extracts the content of an image attachment as text, so screenshots (an HSR build, a
@@ -33,6 +36,12 @@ class VisionService(
 
     private val log = LoggerFactory.getLogger(javaClass)
 
+    init {
+        // Register classpath ImageIO plugins (the webp reader) so SPI discovery still works
+        // from a Spring Boot fat jar. ponytail: cheap, once at startup.
+        ImageIO.scanForPlugins()
+    }
+
     /** Extracted text of the first image attached to [message], or null (see class doc). */
     fun describeFirstImage(message: Message): String? {
         val model = properties.visionModelName?.trim()?.takeIf { it.isNotEmpty() } ?: return null
@@ -42,10 +51,11 @@ class VisionService(
             return null
         }
         return try {
-            val bytes = image.proxy.download().get(15, TimeUnit.SECONDS).use { it.readBytes() }
-            val mime = image.contentType
+            val rawBytes = image.proxy.download().get(15, TimeUnit.SECONDS).use { it.readBytes() }
+            val declaredMime = image.contentType
                 ?.let { runCatching { MimeType.valueOf(it) }.getOrNull() }
                 ?: MimeTypeUtils.IMAGE_PNG
+            val (mime, bytes) = toOllamaImage(declaredMime, rawBytes)
             val userMessage = UserMessage.builder()
                 .text(VISION_PROMPT)
                 .media(Media(mime, ByteArrayResource(bytes)))
@@ -79,6 +89,23 @@ class VisionService(
     companion object {
         /** Skip images above this size — Discord allows huge uploads, base64 inflates them further. */
         const val MAX_IMAGE_BYTES = 10L * 1024 * 1024
+
+        /** Formats Ollama's own decoder accepts; everything else is transcoded to png first. */
+        private val OLLAMA_NATIVE_SUBTYPES = setOf("png", "jpeg", "gif")
+
+        /**
+         * Ollama's image decoder only reads png/jpeg/gif and 400s on anything else — notably
+         * webp, which Discord serves for many pastes/stickers. Transcode non-native formats to
+         * png via ImageIO (webp reader added by the imageio-webp dependency). Undecodable input
+         * falls through unchanged so the outer catch keeps the fail-soft, text-only contract.
+         */
+        fun toOllamaImage(mime: MimeType, bytes: ByteArray): Pair<MimeType, ByteArray> {
+            if (mime.subtype.lowercase() in OLLAMA_NATIVE_SUBTYPES) return mime to bytes
+            val img = runCatching { ImageIO.read(ByteArrayInputStream(bytes)) }.getOrNull()
+                ?: return mime to bytes
+            val png = ByteArrayOutputStream().also { ImageIO.write(img, "png", it) }.toByteArray()
+            return MimeTypeUtils.IMAGE_PNG to png
+        }
 
         /**
          * Merges the extracted image text into the user's turn. Null/blank extraction leaves
