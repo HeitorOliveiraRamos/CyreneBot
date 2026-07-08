@@ -56,8 +56,23 @@ class NanokaIngestionSource(
         .connectTimeout(Duration.ofSeconds(10))
         .build()
 
-    /** Fetches + flattens every dataset into embeddable documents. Empty on hard failure. */
-    fun load(): List<Document> {
+    /**
+     * Fetches + flattens every dataset into embeddable documents. Empty on hard failure.
+     *
+     * The optional maps overlay PT display names (game id → name) on top of this source's own
+     * English index names — nanoka has no `pt` field, so PT comes from starrailstation
+     * ([StarRailStationIngestionSource.SrsData]) and `hsr_character` (StarRailRes). The overlay
+     * is per id (`enNames + ptMap`): an id the PT side doesn't know yet (leaked/unreleased) still
+     * renders with its English name instead of being dropped. Build docs MUST render item names
+     * through the same strings as the PT relic_set/light_cone docs or the
+     * `GameKnowledgeTools.effectDocs` exact-name join silently misses and the voice model,
+     * seeing names without effect text, invents effects (live bug 2026-07-08).
+     */
+    fun load(
+        relicNamesPt: Map<String, String> = emptyMap(),
+        coneNamesPt: Map<String, String> = emptyMap(),
+        charNamesPt: Map<String, String> = emptyMap(),
+    ): List<Document> {
         val version = resolveVersion() ?: run {
             log.error("Nanoka: could not resolve data version (home page {} unreachable and no pinned version). Aborting nanoka ingest.",
                 properties.knowledge.nanokaHomeUrl)
@@ -72,7 +87,7 @@ class NanokaIngestionSource(
         val coneIndex = getJson("$base/lightcone.json")
 
         val docs = mutableListOf<Document>()
-        docs += characters(base, enNames(relicIndex), enNames(coneIndex))
+        docs += characters(base, enNames(relicIndex) + relicNamesPt, enNames(coneIndex) + coneNamesPt, charNamesPt)
         docs += relicSets(relicIndex)
         docs += enemies(base)
         docs += lightCones(base, coneIndex)
@@ -101,13 +116,16 @@ class NanokaIngestionSource(
         base: String,
         relicNames: Map<String, String>,
         coneNames: Map<String, String>,
+        charNamesPt: Map<String, String>,
     ): List<Document> {
         val index = getJson("$base/character.json") ?: return emptyList()
-        val charNames = enNames(index)
+        val charNames = enNames(index) + charNamesPt
         val docs = mutableListOf<Document>()
         var withKit = 0
         for ((id, meta) in index.fields()) {
-            val name = meta.path("en").asText("").trim()
+            // PT display name when known — keeps ALL of a character's docs (these + the
+            // starrailstation ones) under ONE metadata name for the name-anchored tier.
+            val name = (charNamesPt[id] ?: meta.path("en").asText("")).trim()
             if (name.isEmpty()) continue
             docs += profileDoc(id, name, meta)
 
@@ -198,7 +216,8 @@ class NanokaIngestionSource(
             if (cones.isNotEmpty()) append("Cone de Luz (melhor primeiro): ${cones.joinToString("; ")}\n")
             if (mains.isNotEmpty()) append("Main stats: ${mains.joinToString(", ")}\n")
             if (subs.isNotEmpty()) append("Substats (prioridade): ${subs.joinToString(" > ")}\n")
-            if (team.isNotEmpty()) append("Time recomendado: ${(listOf(charName) + team).joinToString(", ")}\n")
+            // "Equipe", not "Time": the voice model read "Time" as English and rendered "Tempo".
+            if (team.isNotEmpty()) append("Equipe recomendada: ${(listOf(charName) + team).joinToString(", ")}\n")
         }.trim()
         return Document(text, metaOf("build", charName, id))
     }

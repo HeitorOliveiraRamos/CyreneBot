@@ -2,6 +2,7 @@ package com.cyrene.knowledge
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -44,6 +45,29 @@ class GameKnowledgeToolsTest {
             many,
         )
         assertEquals(4, matched.size)
+    }
+
+    // -------------------- buildItemNames -------------------- //
+
+    @Test
+    fun `buildItemNames extracts relic, ornament and cone names, never team or stat lines`() {
+        val doc = """
+            Phainon — build recomendada (Honkai: Star Rail).
+            Relíquias (4 peças, melhor primeiro): Wavestrider Captain; Champion of Streetwise Boxing
+            Ornamento Planar (melhor primeiro): Arcadia of Woven Dreams; Rutilant Arena
+            Cone de Luz (melhor primeiro): Thus Burns the Dawn
+            Main stats: Corpo: Chance Crít., Pés: ATQ%
+            Substats (prioridade): Chance Crít. > Dano Crít.
+            Equipe recomendada: Phainon, Cerydra, Cyrene
+        """.trimIndent()
+        assertEquals(
+            listOf(
+                "Wavestrider Captain", "Champion of Streetwise Boxing",
+                "Arcadia of Woven Dreams", "Rutilant Arena", "Thus Burns the Dawn",
+            ),
+            GameKnowledgeTools.buildItemNames(doc),
+        )
+        assertTrue(GameKnowledgeTools.buildItemNames("Acheron — habilidade: Octobolt Flash").isEmpty())
     }
 
     // -------------------- filterBySection -------------------- //
@@ -106,6 +130,33 @@ class GameKnowledgeToolsTest {
             relic,
             GameKnowledgeTools.filterBySection(relic, "efeito da relíquia band of sizzling thunder"),
         )
+    }
+
+    @Test
+    fun `main stat and slot questions pin the build doc`() {
+        val build = listOf(kit[6])
+        // The exact live miss: "main stat" is two tokens, "corpo" is a slot word.
+        assertEquals(
+            build,
+            GameKnowledgeTools.filterBySection(kit, "qual main stat que eu devo buscar no corpo do phainon?"),
+        )
+        assertEquals(build, GameKnowledgeTools.filterBySection(kit, "que stats rodar nos pés da acheron?"))
+        assertEquals(build, GameKnowledgeTools.filterBySection(kit, "qual esfera usar na acheron?"))
+    }
+
+    // -------------------- wantsItemEffects -------------------- //
+
+    @Test
+    fun `stat-only questions skip the item effect join`() {
+        assertFalse(GameKnowledgeTools.wantsItemEffects("qual main stat que eu devo buscar no corpo do phainon?"))
+        assertFalse(GameKnowledgeTools.wantsItemEffects("quais substats priorizar na acheron?"))
+    }
+
+    @Test
+    fun `item and mixed questions keep the effect join, and no stat word means default join`() {
+        assertTrue(GameKnowledgeTools.wantsItemEffects("build do phainon"))
+        assertTrue(GameKnowledgeTools.wantsItemEffects("qual set e main stat pra acheron?"))
+        assertTrue(GameKnowledgeTools.wantsItemEffects("quem é a acheron?"))
     }
 
     @Test

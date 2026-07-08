@@ -93,7 +93,14 @@ class GameKnowledgeTools(
             )
         }
         val cap = if (nameHits.isEmpty()) k.topK + 3 else MAX_ANCHORED + k.topK
-        val results = mergeHits(nameHits, vectorHits, query).take(cap)
+        val merged = mergeHits(nameHits, vectorHits, query).take(cap)
+        // A build doc lists relic/ornament/cone NAMES only; join in each item's own
+        // relic_set/light_cone doc so the voice pass retells the real effect text
+        // instead of inventing one per name. Appended after the cap: at most ~9 short
+        // docs per build, never displacing the anchored kit. Skipped for stat-only
+        // questions — 9 item docs are noise there, and their numbers leak into the
+        // answer ("qual main stat no corpo" answered with an ornament's 8%).
+        val results = if (wantsItemEffects(query)) merged + effectDocs(merged) else merged
 
         if (results.isEmpty()) {
             log.debug("lookupHsr: no local hit for '{}' (threshold {})", query, k.similarityThreshold)
@@ -133,6 +140,37 @@ class GameKnowledgeTools(
                 "category" to (row["category"] ?: "unknown"),
                 "name" to row["name"],
             )
+        }
+    }
+
+    /**
+     * relic_set / light_cone docs for the items named inside retrieved build docs, skipping
+     * any already present in [results]. Exact-name lookup: build docs and item docs are
+     * rendered from the same nanoka index files, so the names match verbatim. Fail-open.
+     */
+    private fun effectDocs(results: List<Map<String, Any?>>): List<Map<String, Any?>> {
+        val wanted = results.filter { it["category"] == "build" }
+            .flatMap { buildItemNames(it["content"] as? String ?: "") }
+            .distinct()
+            .minus(results.mapNotNull { it["name"] as? String }.toSet())
+        if (wanted.isEmpty()) return emptyList()
+        val placeholders = wanted.joinToString(",") { "?" }
+        return try {
+            jdbc.queryForList(
+                "SELECT content, metadata->>'category' AS category, metadata->>'name' AS name " +
+                    "FROM vector_store WHERE metadata->>'category' IN ('relic_set','light_cone') " +
+                    "AND metadata->>'name' IN ($placeholders)",
+                *wanted.toTypedArray(),
+            ).map { row ->
+                mapOf<String, Any?>(
+                    "content" to row["content"],
+                    "category" to (row["category"] ?: "unknown"),
+                    "name" to row["name"],
+                )
+            }
+        } catch (e: Exception) {
+            log.warn("lookupHsr effect join failed: {}", e.message)
+            emptyList()
         }
     }
 
@@ -196,6 +234,48 @@ class GameKnowledgeTools(
         /** "e2" / "eidolon 2" in a normalized query → the eidolon number asked about. */
         private val EIDOLON_NUM = Regex("\\b(?:e|eidolon\\s*)([1-6])\\b")
 
+        /** Build-doc lines that list equipment by name (labels from NanokaIngestionSource.buildDoc). */
+        private val ITEM_LINES = listOf("Relíquias", "Ornamento Planar", "Cone de Luz")
+
+        /** Stat/slot words: the question asks WHICH STAT to run, not which items. */
+        private val STAT_TOKENS = setOf(
+            "main", "stat", "stats", "mainstat", "mainstats", "substat", "substats",
+            "corpo", "pes", "botas", "esfera", "corda", "bola",
+        )
+
+        /** Item words: the question (also) asks about the equipment itself — effects wanted. */
+        private val ITEM_TOKENS = setOf(
+            "build", "builds", "reliquia", "reliquias", "relic", "relics", "set", "sets",
+            "cone", "cones", "lightcone", "lightcones", "ornamento", "ornamentos",
+            "ornament", "ornaments", "efeito", "efeitos", "equipe", "equipes",
+            "team", "teams", "time", "times",
+        )
+
+        /**
+         * Whether retrieved build docs should be expanded with their items' effect docs.
+         * False only for stat-only questions (a stat/slot word and NO item word): the build
+         * doc's "Main stats"/"Substats" lines already hold the whole answer, and the item
+         * effects' unrelated percentages get woven into it. Doubt defaults to true — the
+         * effect join is the safer side for every other build-shaped question. Pure.
+         */
+        internal fun wantsItemEffects(query: String): Boolean {
+            val tokens = HsrCharacterService.normalize(query).split(TOKEN_SEP).toSet()
+            return tokens.none { it in STAT_TOKENS } || tokens.any { it in ITEM_TOKENS }
+        }
+
+        /**
+         * Equipment names listed in a build doc ("Relíquias …: A; B; C") — the items whose
+         * effect text lives in their own relic_set/light_cone docs. Team/stat lines are
+         * skipped. Pure, so the parsing contract is unit-testable without a DB.
+         */
+        internal fun buildItemNames(buildContent: String): List<String> =
+            buildContent.lineSequence()
+                .filter { line -> ITEM_LINES.any(line::startsWith) }
+                .flatMap { it.substringAfter(':').split(';') }
+                .map(String::trim)
+                .filter(String::isNotEmpty)
+                .toList()
+
         /**
          * Combines the exact name-anchored hits with the semantic vector fill. With no named
          * entity the vector tier stands alone (deduped) — it's all we have. With a named entity
@@ -230,8 +310,13 @@ class GameKnowledgeTools(
             setOf("light_cone", "build") to "cone cones lightcone lightcones",
             setOf("relic_set", "build") to "reliquia reliquias relic relics set sets " +
                 "ornamento ornamentos ornament ornaments",
+            // "main stat" arrives as TWO tokens — both must cue (live miss: "qual main stat no
+            // corpo do phainon" matched nothing and shipped the whole kit to the voice pass).
             setOf("build") to "build builds time times equipe equipes team teams " +
-                "substat substats mainstat mainstats",
+                "substat substats mainstat mainstats main stat stats corpo pes botas",
+            // Ornament slot words: build doc for "qual esfera pra acheron", the set's own doc
+            // for "efeito da esfera arena rutilante" — whichever the anchored entity has.
+            setOf("relic_set", "build") to "esfera corda",
             setOf("profile") to "elemento caminho path raridade",
             setOf("profile", "skill", "trace", "eidolon") to "kit",
         ).flatMap { (cats, words) -> words.split(' ').map { it to cats } }.toMap()

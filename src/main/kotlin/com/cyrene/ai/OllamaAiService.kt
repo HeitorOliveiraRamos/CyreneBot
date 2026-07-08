@@ -488,6 +488,11 @@ class OllamaAiService(
               efeitos, energia, traces, Eidolons — sem cortar nem resumir o que veio.
             - Use SOMENTE os dados fornecidos abaixo. NÃO complete de memória. Se um campo
               não veio nos dados, simplesmente não fale dele.
+            - NUNCA invente o efeito/descrição de um item. Se uma relíquia, ornamento,
+              cone ou personagem aparece nos dados só pelo NOME, repasse só o nome, SEM
+              acrescentar explicação ao lado. Quando o efeito real vier em outro bloco
+              dos dados, inclua esse texto junto do nome — copiado fiel, não parafraseado
+              de memória.
             - Os dados podem chegar em inglês ou chinês: TRADUZA tudo para português
               brasileiro. NUNCA copie trechos em outro idioma na resposta — nomes próprios
               de habilidades/cones podem ficar em inglês, mas descrições e efeitos devem

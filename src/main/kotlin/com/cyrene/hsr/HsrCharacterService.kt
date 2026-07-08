@@ -35,6 +35,15 @@ class HsrCharacterService(
 
     fun byId(id: String): HsrCharacter? = loaded()[id]
 
+    /**
+     * Game id → PT display name, for callers that render character names to users
+     * (e.g. the knowledge ingest localizing team lists). Ids without a PT name are
+     * absent so callers keep their own fallback; empty when the table isn't loaded.
+     */
+    fun ptNames(): Map<String, String> = buildMap {
+        loaded().forEach { (id, c) -> c.namePt?.let { put(id, it) } }
+    }
+
     fun fribbelsMeta(id: String): FribbelsMeta? = loaded()[id]?.fribbels
 
     /**

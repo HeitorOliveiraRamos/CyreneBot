@@ -179,6 +179,19 @@ data class BotProperties(
         val nanokaHomeUrl: String = "https://hsr.nanoka.cc/",
         val nanokaCdnUrl: String = "https://static.nanoka.cc/hsr",
         val nanokaVersion: String? = null,
+        /**
+         * Source for the PT-BR core kit data ([com.cyrene.knowledge.StarRailStationIngestionSource]):
+         * character profiles/skills/eidolons, light cones and relic sets in real Portuguese
+         * (nanoka's text is English). The site is a JSON app; [srsDataUrl] is its data API and
+         * [srsDeploymentId] (the patch-versioned deploy hash) is auto-discovered from [srsHomeUrl]'s
+         * HTML — set it (blank/null = auto) to pin a patch. [srsLocale] is the path prefix the
+         * data files live under. When starrailstation is unreachable the reindex falls back to
+         * full (English) nanoka, so a bad fetch never leaves the KB empty.
+         */
+        val srsHomeUrl: String = "https://starrailstation.com/pt/",
+        val srsDataUrl: String = "https://starrailstation.com/api/v1/datav2/",
+        val srsLocale: String = "pt",
+        val srsDeploymentId: String? = null,
         val batchSize: Int = 64,
         val topK: Int = 5,
         val similarityThreshold: Double = 0.55,

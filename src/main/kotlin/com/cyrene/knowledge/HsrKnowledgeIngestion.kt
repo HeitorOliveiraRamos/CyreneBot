@@ -1,6 +1,7 @@
 package com.cyrene.knowledge
 
 import com.cyrene.config.BotProperties
+import com.cyrene.hsr.HsrCharacterService
 import org.slf4j.LoggerFactory
 import org.springframework.ai.document.Document
 import org.springframework.ai.vectorstore.VectorStore
@@ -10,26 +11,30 @@ import org.springframework.stereotype.Component
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Rebuilds the Honkai: Star Rail vector store from [NanokaIngestionSource] (structured
- * JSON from [nanoka.cc](https://hsr.nanoka.cc)).
+ * Rebuilds the Honkai: Star Rail vector store from two structured-JSON sources:
+ * [StarRailStationIngestionSource] (PT-BR profiles/skills/eidolons/light cones/relic sets) and
+ * [NanokaIngestionSource] (English builds, enemies and major traces — the categories srs doesn't
+ * serve). srs owns the high-value, most-queried kit docs in real Portuguese; nanoka fills the gaps.
  *
  * Two triggers, same [reindex] body:
  *  - startup, when `bot.knowledge.reindex=true` (`HSR_REINDEX=true mvn spring-boot:run`) —
  *    the manual, run-once path;
  *  - [KbFreshnessCheck], when `bot.knowledge.auto-reindex` is on and nanoka starts serving
- *    a newer data version than the one indexed — the hands-off path.
+ *    a newer data version than the one indexed — the hands-off path. srs's deploy moves with the
+ *    same patch, so nanoka's version signal doubles as the trigger for both.
  *
- * The version is auto-discovered from nanoka's home page; pin it with `HSR_NANOKA_VERSION` to
- * freeze a patch. nanoka is the sole source — it carries fuller, current-per-patch kits than
- * the old Kaggle CSV dump, so this truncates `vector_store` and re-embeds purely from it.
- * Documents are loaded BEFORE the truncate, so a broken fetch never wipes a working KB.
+ * Documents are loaded BEFORE the truncate, so a broken fetch never wipes a working KB. If
+ * starrailstation is unreachable, [reindex] falls back to FULL (English) nanoka rather than lose
+ * profiles/skills/eidolons entirely — degraded, but never empty.
  */
 @Component
 class HsrKnowledgeIngestion(
     private val vectorStore: VectorStore,
     private val jdbcTemplate: JdbcTemplate,
     private val properties: BotProperties,
+    private val srs: StarRailStationIngestionSource,
     private val nanoka: NanokaIngestionSource,
+    private val characters: HsrCharacterService,
 ) : CommandLineRunner {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -50,9 +55,21 @@ class HsrKnowledgeIngestion(
             return
         }
         try {
-            val docs = nanoka.load()
+            // srs (PT) owns profile/skill/eidolon/light_cone/relic_set; nanoka fills the rest.
+            // srs down → full English nanoka rather than lose the core kit docs. Loaded before the
+            // truncate so a broken source never wipes a working KB. Nanoka's docs render names
+            // through the srs PT maps (+ hsr_character for team members) so build docs list items
+            // by the SAME strings as the PT item docs — the effectDocs join depends on it.
+            val srsData = srs.load()
+            val nanokaDocs = nanoka.load(srsData.relicNames, srsData.coneNames, characters.ptNames())
+            val docs = if (srsData.docs.isEmpty()) {
+                log.warn("starrailstation returned 0 documents — falling back to full (English) nanoka.")
+                nanokaDocs
+            } else {
+                srsData.docs + nanokaDocs.filter { it.metadata["category"] in NANOKA_ONLY_CATEGORIES }
+            }
             if (docs.isEmpty()) {
-                log.error("Parsed 0 usable documents from nanoka — aborting before clearing the store.")
+                log.error("Parsed 0 usable documents from both sources — aborting before clearing the store.")
                 return
             }
 
@@ -97,5 +114,10 @@ class HsrKnowledgeIngestion(
             vectorStore.add(batch)
             log.info("  embedded batch {}/{} ({} docs)", i + 1, batches.size, batch.size)
         }
+    }
+
+    private companion object {
+        /** Categories starrailstation can't serve, so nanoka keeps them (see class kdoc). */
+        private val NANOKA_ONLY_CATEGORIES = setOf("build", "enemy", "trace")
     }
 }

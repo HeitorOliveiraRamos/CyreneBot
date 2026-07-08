@@ -102,7 +102,7 @@ class NanokaIngestionSourceTest {
         assertTrue("Cone de Luz (melhor primeiro): Along the Passing Shore" in text)
         assertTrue("Esfera Planar: Dano de Raio" in text)
         assertTrue("Substats (prioridade): Chance Crít. > ATQ%" in text)
-        assertTrue("Time recomendado: Acheron, Jiaoqiu" in text)
+        assertTrue("Equipe recomendada: Acheron, Jiaoqiu" in text)
         // Unresolvable id dropped, not rendered raw; fixed-main HEAD slot skipped.
         assertFalse("999" in text)
         assertFalse("HEAD" in text)
@@ -114,5 +114,19 @@ class NanokaIngestionSourceTest {
     fun `buildDoc is null when there is nothing to recommend`() {
         val detail = mapper.readTree("""{"relics": {"set4_id_list": [999]}, "lightcones": []}""")
         assertNull(source.buildDoc("X", "1", detail, emptyMap(), emptyMap(), emptyMap()))
+    }
+
+    @Test
+    fun `load-style PT overlay renders PT item names with EN fallback per id`() {
+        // Same merge load() does: enNames + ptMap — PT wins where known, EN survives where not.
+        val en = mapOf("117" to "Pioneer Diver of Dead Waters", "328" to "Unreleased Set")
+        val pt = mapOf("117" to "Mergulhadora Pioneira de Águas Mortas")
+        val detail = mapper.readTree(
+            """{"relics": {"set4_id_list": [117, 328]}, "lightcones": []}""",
+        )
+        val text = source.buildDoc("Anaxa", "1405", detail, en + pt, emptyMap(), emptyMap())!!.text.orEmpty()
+        assertTrue("Mergulhadora Pioneira de Águas Mortas" in text)
+        assertFalse("Pioneer Diver" in text)
+        assertTrue("Unreleased Set" in text)
     }
 }
