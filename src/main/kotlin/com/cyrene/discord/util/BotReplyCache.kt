@@ -44,11 +44,15 @@ class BotReplyCache(properties: BotProperties) {
 
     /** Records a message relevant to reply-chain walks (a bot reply or a human message
      *  the bot answered). Safe to call repeatedly for the same id — it just refreshes. */
-    fun put(message: Message) {
+    fun put(message: Message) = put(message, message.contentRaw)
+
+    /** [put] with explicit content — used for button-paginated replies, where the visible
+     *  page is only a slice of the full answer the chain walker should see. */
+    fun put(message: Message, content: String) {
         val ref = message.messageReference
         val author = message.author
         cache[message.id] = Entry(
-            content = message.contentRaw,
+            content = content,
             authorId = author.id,
             authorName = author.effectiveName,
             isBot = author.isBot,

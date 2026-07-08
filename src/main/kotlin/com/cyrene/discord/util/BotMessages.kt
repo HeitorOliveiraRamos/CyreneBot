@@ -23,6 +23,10 @@ object BotMessages {
     const val BUSY_SESSION =
         "Só um instante, ainda estou respondendo outra coisa… manda de novo daqui a pouco. 💭"
 
+    /** A ◀ ▶ page button clicked after its state expired (bot restart or LRU eviction). */
+    const val PAGES_EXPIRED =
+        "Essa resposta já é antiga e eu perdi as outras páginas dela 😔 Me pergunta de novo que eu refaço!"
+
     /** A reply pipeline failed unexpectedly. */
     const val ERROR =
         "Ai, me embolei toda aqui e não consegui responder agora 😔 Tenta de novo daqui a pouco?"
