@@ -39,12 +39,15 @@ class DiscordMessageSender(
         if (original.isFromGuild) {
             val pages = paginator.paginate(safe)
             if (pages.size > 1) {
-                val key = paginator.register(pages)
+                val key = paginator.register(safe)
                 original.reply(paginator.render(pages, 0))
                     .setComponents(ActionRow.of(paginator.buttons(key, 0, pages.size)))
                     // Cache the full answer, not page 1: a user replying to this message
                     // should hand the model the whole text as context, not the visible slice.
-                    .queue { botReplyCache.put(it, safe) }
+                    .queue { sent ->
+                        paginator.linkMessage(key, sent.id)
+                        botReplyCache.put(sent, safe)
+                    }
                 return
             }
         }
@@ -64,10 +67,13 @@ class DiscordMessageSender(
         if (hook.interaction.isFromGuild) {
             val pages = paginator.paginate(safe)
             if (pages.size > 1) {
-                val key = paginator.register(pages)
+                val key = paginator.register(safe)
                 hook.sendMessage(paginator.render(pages, 0))
                     .setComponents(ActionRow.of(paginator.buttons(key, 0, pages.size)))
-                    .queue { botReplyCache.put(it, safe) }
+                    .queue { sent ->
+                        paginator.linkMessage(key, sent.id)
+                        botReplyCache.put(sent, safe)
+                    }
                 return
             }
         }

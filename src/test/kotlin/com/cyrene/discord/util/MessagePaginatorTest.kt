@@ -1,13 +1,16 @@
 package com.cyrene.discord.util
 
+import org.springframework.jdbc.core.JdbcTemplate
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** Guards the markdown-safe page splitting: word cap, no lost text, no broken code fences. */
 class MessagePaginatorTest {
 
-    private val paginator = MessagePaginator()
+    // DataSource-less JdbcTemplate: splitting is pure, and the store must fail open anyway.
+    private val paginator = MessagePaginator(JdbcTemplate())
 
     @Test
     fun `short text is a single page`() {
@@ -55,9 +58,16 @@ class MessagePaginatorTest {
     }
 
     @Test
-    fun `registered pages are retrievable by key`() {
-        val pages = listOf("a", "b")
-        val key = paginator.register(pages)
-        assertEquals(pages, paginator.pages(key))
+    fun `store operations fail open when the database is unreachable`() {
+        assertEquals(8, paginator.register("texto").length)
+        paginator.linkMessage("chave123", "42")
+        assertNull(paginator.pages("chave123"))
+        assertNull(paginator.fullTextByMessageId("42"))
+    }
+
+    @Test
+    fun `page footer regex matches rendered output only at the end`() {
+        assertTrue(MessagePaginator.PAGE_FOOTER.containsMatchIn(paginator.render(listOf("a", "b"), 1)))
+        assertTrue(!MessagePaginator.PAGE_FOOTER.containsMatchIn("fala de -# (1/2) no meio"))
     }
 }

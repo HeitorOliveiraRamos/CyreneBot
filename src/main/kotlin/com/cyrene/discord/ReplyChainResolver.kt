@@ -4,6 +4,7 @@ import com.cyrene.config.BotProperties
 import com.cyrene.conversation.MessageRole
 import com.cyrene.discord.util.BotReplyCache
 import com.cyrene.discord.util.CachedBotMessage
+import com.cyrene.discord.util.MessagePaginator
 import net.dv8tion.jda.api.entities.Message
 import net.dv8tion.jda.api.entities.channel.middleman.MessageChannel
 import org.slf4j.LoggerFactory
@@ -36,6 +37,7 @@ import java.util.concurrent.TimeUnit
 class ReplyChainResolver(
     private val botReplyCache: BotReplyCache,
     private val properties: BotProperties,
+    private val paginator: MessagePaginator,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -115,7 +117,7 @@ class ReplyChainResolver(
         return when {
             author.id == selfUserId -> ChainEntry(
                 authorName = SELF_AUTHOR_LABEL,
-                content = message.contentRaw,
+                content = resolveSelfContent(message),
                 role = MessageRole.ASSISTANT,
             )
             author.isBot -> ChainEntry(
@@ -131,6 +133,19 @@ class ReplyChainResolver(
             )
         }
     }
+
+    /**
+     * A paginated reply's Discord content is one visible page + footer; swap in the stored
+     * full answer so the model gets the whole prior turn. Footer check first, so the common
+     * non-paginated turn never touches the DB (the in-cache tier already carries full text —
+     * this only fires on REST-fetched hops, i.e. after a restart or cache expiry).
+     */
+    private fun resolveSelfContent(message: Message): String =
+        if (MessagePaginator.PAGE_FOOTER.containsMatchIn(message.contentRaw)) {
+            paginator.fullTextByMessageId(message.id) ?: message.contentRaw
+        } else {
+            message.contentRaw
+        }
 
     /** Same mapping as [toChainEntry] but from a cached entry (no JDA [Message] needed). */
     private fun CachedBotMessage.toChainEntry(selfUserId: String): ChainEntry = when {
