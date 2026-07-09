@@ -6,6 +6,9 @@
 #   ./bot.sh restart    # recompila e reinicia SÓ o bot (infra fica de pé) — use após mudar código
 #   ./bot.sh stop       # para o bot.  `stop --all` também derruba SearXNG/colima
 #   ./bot.sh status     # mostra o que está no ar
+#   ./bot.sh activity playing "Honkai: Star Rail!"  # muda a atividade do bot SEM reiniciar
+#       tipos: playing|watching|listening|competing|custom | streaming <url> <texto>
+#       sem tipo => playing (ex.: activity "Honkai: Star Rail!");  activity (sem nada) => limpa
 #   ./bot.sh logs       # tail -f do log do bot
 #   ./bot.sh reindex    # (re)constrói a base de conhecimento HSR e sai
 #
@@ -238,6 +241,17 @@ cmd_status() {
 
 cmd_logs() { tail -f "$LOG_FILE"; }
 
+# Muda a atividade do bot sem reiniciar: escreve `<tipo> <texto>` num arquivo que o
+# ActivityStatusWatcher no bot lê a cada ~5s. Tipos: playing|watching|listening|competing|
+# custom | streaming <url> <texto>. Sem tipo => playing. `activity` sem nada => limpa.
+cmd_activity() {
+  local text="$*"
+  printf '%s' "$text" > "$SCRIPT_DIR/.bot.activity"
+  if [ -n "$text" ]; then ok "Atividade: \"$text\" (aplica em ~5s)"
+  else ok "Atividade limpa (aplica em ~5s)"; fi
+  bot_running || warn "Bot parado — a atividade será aplicada quando ele subir."
+}
+
 cmd_reindex() {
   require_env; resolve_java
   start_postgres; start_ollama
@@ -274,7 +288,8 @@ case "${1:-}" in
   restart) cmd_restart ;;
   stop)    shift; cmd_stop "${1:-}" ;;
   status)  cmd_status ;;
+  activity) shift; cmd_activity "$@" ;;
   logs)    cmd_logs ;;
   reindex) cmd_reindex ;;
-  *) echo "uso: ./bot.sh {start|restart|stop [--all]|status|logs|reindex}"; exit 1 ;;
+  *) echo "uso: ./bot.sh {start|restart|stop [--all]|status|activity [tipo] \"texto\"|logs|reindex}"; exit 1 ;;
 esac
