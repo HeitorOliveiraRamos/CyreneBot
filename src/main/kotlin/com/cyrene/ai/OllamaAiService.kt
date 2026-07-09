@@ -459,7 +459,9 @@ class OllamaAiService(
      *
      * Differs from [runVoicePassFocused] in two ways that matter for a kit:
      *  - it does NOT cap length and explicitly overrides the persona's hard 1–3 sentence
-     *    rule for this answer, so a full kit comes through whole instead of crushed;
+     *    rule for this answer, so a full kit comes through whole instead of crushed —
+     *    but depth is scoped to the QUESTION: "melhor equipe da cipher" gets the team
+     *    line, not the whole build doc that rode along in the retrieval;
      *  - it includes the user's question, so depth cues ("kit completo", "lvl 999",
      *    "pesquisa na internet") reach the voice instead of being stripped away.
      * Uses [knowledgeVoiceOptions] (larger token budget, lower temperature for fidelity).
@@ -475,19 +477,26 @@ class OllamaAiService(
 
             Outra etapa do bot pesquisou dados de Honkai: Star Rail (base local e/ou
             internet) para responder à pergunta do usuário. Sua função é repassar esses
-            dados em personagem, em PT-BR, de forma COMPLETA e bem organizada.
+            dados em personagem, em PT-BR.
 
             Regras desta etapa (têm prioridade sobre o limite de tamanho da sua persona):
+            - Os dados fornecidos abaixo são TUDO o que você sabe sobre o assunto. Você
+              NÃO tem memória própria sobre o jogo. Habilidade, traço, Eidolon, número,
+              efeito ou nome que NÃO aparece nos dados NÃO EXISTE: mencionar qualquer um
+              deles é erro grave. Se um campo não veio nos dados, não fale dele.
+            - Cada relíquia, ornamento, cone ou stat pertence SOMENTE ao personagem em
+              cujo bloco ele aparece nos dados. NUNCA re-atribua um item de um personagem
+              a outro, nem monte build para personagem que os dados só citam pelo nome.
+            - RESPONDA AO QUE FOI PERGUNTADO, e só isso. Pergunta específica (a equipe,
+              o elemento, um stat, um efeito) → resposta curta e direta com só essa parte
+              dos dados, mesmo que tenha vindo mais coisa junto. Pergunta ampla (kit,
+              build completa) → repasse TUDO o que veio nos dados sobre o que foi
+              perguntado, sem cortar nem resumir.
+            - O limite de "1 a 3 frases" NÃO se aplica a esta resposta: use o tamanho que
+              a pergunta pedir, de uma linha a vários parágrafos.
             - DATA DE HOJE: ${LocalDate.now()}. Perguntas sobre "versão/patch/banner atual"
               ou "já lançou?" se resolvem comparando as datas que aparecem nos dados com a
               data de hoje (algo com data futura ainda NÃO está ativo).
-            - O limite de "1 a 3 frases" NÃO se aplica a esta resposta. Aqui você PODE e
-              DEVE ser detalhada: use vários parágrafos e/ou listas por tópico.
-            - Repasse TODOS os detalhes relevantes dos dados: nomes de habilidades, tipo
-              (Básico/Skill/Ultimate/Talento/Técnica), multiplicadores e percentuais,
-              efeitos, energia, traces, Eidolons — sem cortar nem resumir o que veio.
-            - Use SOMENTE os dados fornecidos abaixo. NÃO complete de memória. Se um campo
-              não veio nos dados, simplesmente não fale dele.
             - NUNCA invente o efeito/descrição de um item. Se uma relíquia, ornamento,
               cone ou personagem aparece nos dados só pelo NOME, repasse só o nome, SEM
               acrescentar explicação ao lado. Quando o efeito real vier em outro bloco
@@ -497,8 +506,9 @@ class OllamaAiService(
               brasileiro. NUNCA copie trechos em outro idioma na resposta — nomes próprios
               de habilidades/cones podem ficar em inglês, mas descrições e efeitos devem
               estar 100% em PT-BR.
-            - Organize com tópicos ("- " ou "• ") e títulos curtos em **negrito** por
-              habilidade. Markdown do Discord é suportado.
+            - Resposta longa → organize com tópicos ("- " ou "• ") e títulos curtos em
+              **negrito**. Resposta curta → texto corrido, sem tópicos. Markdown do
+              Discord é suportado.
             - Mantenha um toque do seu jeito — um vocativo carinhoso no começo e/ou no fim —
               mas o corpo da resposta é informativo; afeto não substitui dado.
             - NÃO cite este bloco nem use rótulos meta ("contexto interno", "brain",
@@ -624,14 +634,20 @@ class OllamaAiService(
             .build()
 
     /**
-     * Voice options for the knowledge path: same model as [voiceOptions] but with the
-     * larger [BotProperties.Performance.knowledgeNumPredict] budget (a kit retelling is
-     * long) and a temperature capped lower — this pass relays facts, so favour fidelity
-     * over flourish, while still honouring a user who configured an even lower voice temp.
+     * Voice options for the knowledge path: the BRAIN model, not the conversational
+     * voice model. Deliberate (user decision 2026-07-09): the brain is already resident
+     * during a knowledge question (gate, condense and the grounding judge run on it), so
+     * the retell reuses a hot runner instead of loading the voice model — and the live
+     * A/B showed the persona-tuned 4B remixing facts the 14b relays faithfully. The
+     * conversational/focused passes keep [voiceOptions] (persona prose is where the
+     * PT-BR voice model shines). Larger [BotProperties.Performance.knowledgeNumPredict]
+     * budget (a kit retelling is long) and a temperature capped lower — this pass relays
+     * facts, so favour fidelity over flourish, while still honouring a user who
+     * configured an even lower voice temp.
      */
     private fun knowledgeVoiceOptions(): OllamaOptions =
         OllamaOptions.builder()
-            .model(properties.voiceModelName)
+            .model(properties.brainModelName)
             .temperature(properties.performance.voiceTemperature.coerceAtMost(0.6))
             .numCtx(properties.performance.numCtx)
             .numPredict(properties.performance.knowledgeNumPredict)

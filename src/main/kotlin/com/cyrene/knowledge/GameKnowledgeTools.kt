@@ -94,13 +94,19 @@ class GameKnowledgeTools(
         }
         val cap = if (nameHits.isEmpty()) k.topK + 3 else MAX_ANCHORED + k.topK
         val merged = mergeHits(nameHits, vectorHits, query).take(cap)
+        // Build docs are trimmed to the line(s) the question names (team, relics, cone,
+        // stats...) BEFORE anything downstream sees them: handed the whole doc, the voice
+        // model remixed the leftovers — "equipe recomendada do welt" came back with Welt's
+        // own relics dealt out across the teammates as invented per-character builds.
+        val pruned = pruneBuildLines(merged, query)
         // A build doc lists relic/ornament/cone NAMES only; join in each item's own
         // relic_set/light_cone doc so the voice pass retells the real effect text
         // instead of inventing one per name. Appended after the cap: at most ~9 short
-        // docs per build, never displacing the anchored kit. Skipped for stat-only
-        // questions — 9 item docs are noise there, and their numbers leak into the
-        // answer ("qual main stat no corpo" answered with an ornament's 8%).
-        val results = if (wantsItemEffects(query)) merged + effectDocs(merged) else merged
+        // docs per build, never displacing the anchored kit. Runs on the PRUNED lines,
+        // which scopes it for free: a team/stat question keeps no item lines and joins
+        // nothing (their numbers used to leak into stat answers), a relic-only question
+        // joins relic docs but not cones.
+        val results = pruned + effectDocs(pruned)
 
         if (results.isEmpty()) {
             log.debug("lookupHsr: no local hit for '{}' (threshold {})", query, k.similarityThreshold)
@@ -237,30 +243,45 @@ class GameKnowledgeTools(
         /** Build-doc lines that list equipment by name (labels from NanokaIngestionSource.buildDoc). */
         private val ITEM_LINES = listOf("Relíquias", "Ornamento Planar", "Cone de Luz")
 
-        /** Stat/slot words: the question asks WHICH STAT to run, not which items. */
-        private val STAT_TOKENS = setOf(
-            "main", "stat", "stats", "mainstat", "mainstats", "substat", "substats",
-            "corpo", "pes", "botas", "esfera", "corda", "bola",
-        )
-
-        /** Item words: the question (also) asks about the equipment itself — effects wanted. */
-        private val ITEM_TOKENS = setOf(
-            "build", "builds", "reliquia", "reliquias", "relic", "relics", "set", "sets",
-            "cone", "cones", "lightcone", "lightcones", "ornamento", "ornamentos",
-            "ornament", "ornaments", "efeito", "efeitos", "equipe", "equipes",
-            "team", "teams", "time", "times",
-        )
+        /**
+         * Build-doc line labels (from [NanokaIngestionSource.buildDoc]) keyed by the
+         * normalized facet words that ask for them. Slot words (esfera/corda/bola) keep
+         * the ornament line AND the stat lines — the question may mean either. Words that
+         * cue nothing here ("build", "efeito", "quem é") leave the doc whole.
+         */
+        private val LINE_CUES: Map<String, Set<String>> = listOf(
+            setOf("Equipe recomendada") to "equipe equipes team teams time times",
+            setOf("Relíquias") to "reliquia reliquias relic relics set sets",
+            setOf("Ornamento Planar") to "ornamento ornamentos ornament ornaments",
+            setOf("Ornamento Planar", "Main stats", "Substats") to "esfera corda bola",
+            setOf("Cone de Luz") to "cone cones lightcone lightcones",
+            setOf("Main stats", "Substats") to "main stat stats mainstat mainstats " +
+                "substat substats corpo pes botas",
+        ).flatMap { (labels, words) -> words.split(' ').map { it to labels } }.toMap()
 
         /**
-         * Whether retrieved build docs should be expanded with their items' effect docs.
-         * False only for stat-only questions (a stat/slot word and NO item word): the build
-         * doc's "Main stats"/"Substats" lines already hold the whole answer, and the item
-         * effects' unrelated percentages get woven into it. Doubt defaults to true — the
-         * effect join is the safer side for every other build-shaped question. Pure.
+         * Trims each build doc to the line(s) the query asks about; the title line always
+         * survives. The whole doc handed to a small voice model is raw material for
+         * recombination (Welt's relics dealt out across his teammates), so the lines the
+         * question didn't ask for must not reach it. No facet word — or a facet this doc
+         * has no line for — leaves the doc whole, mirroring [filterBySection]: pruning
+         * only ever raises precision, never causes a miss. Non-build docs pass through.
+         * Pure, so the line-scoping contract is unit-testable without a vector store.
          */
-        internal fun wantsItemEffects(query: String): Boolean {
-            val tokens = HsrCharacterService.normalize(query).split(TOKEN_SEP).toSet()
-            return tokens.none { it in STAT_TOKENS } || tokens.any { it in ITEM_TOKENS }
+        internal fun pruneBuildLines(
+            docs: List<Map<String, Any?>>,
+            query: String,
+        ): List<Map<String, Any?>> {
+            val q = HsrCharacterService.normalize(query)
+            val labels = q.split(TOKEN_SEP).flatMap { LINE_CUES[it].orEmpty() }.toSet()
+            if (labels.isEmpty()) return docs
+            return docs.map { doc ->
+                val content = doc["content"] as? String
+                if (doc["category"] != "build" || content == null) return@map doc
+                val kept = content.lines()
+                    .filterIndexed { i, line -> i == 0 || labels.any(line::startsWith) }
+                if (kept.size <= 1) doc else doc + ("content" to kept.joinToString("\n"))
+            }
         }
 
         /**

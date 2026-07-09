@@ -144,19 +144,66 @@ class GameKnowledgeToolsTest {
         assertEquals(build, GameKnowledgeTools.filterBySection(kit, "qual esfera usar na acheron?"))
     }
 
-    // -------------------- wantsItemEffects -------------------- //
+    // -------------------- pruneBuildLines -------------------- //
+
+    private val weltBuild = mapOf<String, Any?>(
+        "content" to """
+            Welt — build recomendada (Honkai: Star Rail).
+            Relíquias (4 peças, melhor primeiro): Wavestrider Captain
+            Ornamento Planar (melhor primeiro): Rutilant Arena
+            Cone de Luz (melhor primeiro): In the Name of the World
+            Main stats: Corpo: Chance Crít., Pés: Velocidade
+            Substats (prioridade): Chance Crít. > Dano Crít.
+            Equipe recomendada: Welt, Himeko, Tribbie, Hyacine
+        """.trimIndent(),
+        "category" to "build",
+        "name" to "Welt",
+    )
 
     @Test
-    fun `stat-only questions skip the item effect join`() {
-        assertFalse(GameKnowledgeTools.wantsItemEffects("qual main stat que eu devo buscar no corpo do phainon?"))
-        assertFalse(GameKnowledgeTools.wantsItemEffects("quais substats priorizar na acheron?"))
+    fun `team question trims the build doc to the team line`() {
+        // The live miss: given the whole doc, the voice dealt Welt's relics out
+        // across the teammates as invented per-character builds.
+        val pruned = GameKnowledgeTools.pruneBuildLines(
+            listOf(weltBuild),
+            "me fala a equipe recomendada do welt",
+        )
+        assertEquals(
+            "Welt — build recomendada (Honkai: Star Rail).\n" +
+                "Equipe recomendada: Welt, Himeko, Tribbie, Hyacine",
+            pruned.single()["content"],
+        )
     }
 
     @Test
-    fun `item and mixed questions keep the effect join, and no stat word means default join`() {
-        assertTrue(GameKnowledgeTools.wantsItemEffects("build do phainon"))
-        assertTrue(GameKnowledgeTools.wantsItemEffects("qual set e main stat pra acheron?"))
-        assertTrue(GameKnowledgeTools.wantsItemEffects("quem é a acheron?"))
+    fun `facet questions keep only their lines and non-build docs pass through`() {
+        val profile = mapOf<String, Any?>(
+            "content" to "Welt — personagem.", "category" to "profile", "name" to "Welt",
+        )
+        val pruned = GameKnowledgeTools.pruneBuildLines(
+            listOf(weltBuild, profile),
+            "qual set e main stat pro welt?",
+        )
+        val content = pruned.first()["content"] as String
+        assertTrue("Relíquias" in content && "Main stats" in content && "Substats" in content)
+        assertFalse("Cone de Luz" in content || "Equipe recomendada" in content)
+        assertEquals(profile, pruned[1])
+    }
+
+    @Test
+    fun `no facet word, or a facet the doc lacks, leaves the build doc whole`() {
+        assertEquals(listOf(weltBuild), GameKnowledgeTools.pruneBuildLines(listOf(weltBuild), "build do welt"))
+        assertEquals(listOf(weltBuild), GameKnowledgeTools.pruneBuildLines(listOf(weltBuild), "quem é o welt?"))
+        val noTeamLine = mapOf<String, Any?>(
+            "content" to "Welt — build recomendada (Honkai: Star Rail).\n" +
+                "Cone de Luz (melhor primeiro): In the Name of the World",
+            "category" to "build",
+            "name" to "Welt",
+        )
+        assertEquals(
+            listOf(noTeamLine),
+            GameKnowledgeTools.pruneBuildLines(listOf(noTeamLine), "melhor equipe do welt"),
+        )
     }
 
     @Test
