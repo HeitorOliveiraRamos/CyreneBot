@@ -7,7 +7,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.4.5</version>
+        <version>3.5.6</version>
         <relativePath/>
     </parent>
 
@@ -17,8 +17,8 @@
     <name>CyreneBot</name>
 
     <properties>
-        <java.version>21</java.version>
-        <kotlin.version>2.1.0</kotlin.version>
+        <java.version>25</java.version>
+        <kotlin.version>2.3.0</kotlin.version>
         <spring-ai.version>1.0.0</spring-ai.version>
         <jda.version>5.5.1</jda.version>
         <jsoup.version>1.18.3</jsoup.version>
