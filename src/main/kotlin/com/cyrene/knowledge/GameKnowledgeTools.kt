@@ -368,23 +368,13 @@ class GameKnowledgeTools(
         }
 
         /**
-         * Entity names present whole-word in the query (accent/case-insensitive), same
-         * matching contract as the character gazetteer: full name, ≥4 normalized chars — no
-         * substring hits, no advice from one common token of a multi-word name. Capped at 4
+         * Entity names present whole-word in the query (accent/case/punctuation-insensitive),
+         * same matching contract as the character gazetteer: full name, ≥4 normalized chars,
+         * longest name wins its span — "build da robin summeretto" anchors "Robin • Summeretto"
+         * and NOT base "Robin" too (see [HsrCharacterService.matchLongest]). Capped at 4
          * names so a listy question can't pull half the KB into the context. Pure.
          */
-        internal fun matchNames(query: String, names: Collection<String?>): List<String> {
-            val q = HsrCharacterService.normalize(query)
-            if (q.isEmpty()) return emptyList()
-            return names.asSequence()
-                .filterNotNull()
-                .distinct()
-                .filter { name ->
-                    val n = HsrCharacterService.normalize(name)
-                    n.length >= 4 && HsrCharacterService.containsWord(q, n)
-                }
-                .take(4)
-                .toList()
-        }
+        internal fun matchNames(query: String, names: Collection<String?>): List<String> =
+            HsrCharacterService.matchLongest(query, names.filterNotNull()).take(4)
     }
 }

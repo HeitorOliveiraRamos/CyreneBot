@@ -53,6 +53,25 @@ class HsrCharacterServiceTest {
     }
 
     @Test
+    fun `charactersIn fires only the SP form when its full name is used`() {
+        // Stored with " - "/"•" separators the user never types: punctuation-folded match.
+        assertEquals(
+            listOf("1213"),
+            HsrCharacterService.charactersIn("o kit do dan heng lua imbibitora é bom?", chars).map { it.id },
+        )
+        // Naming base AND form fires both — the bare mention sits outside the SP span.
+        assertEquals(
+            listOf("1213", "1002"),
+            HsrCharacterService.charactersIn("dan heng ou dan heng lua imbibitora?", chars).map { it.id },
+        )
+    }
+
+    @Test
+    fun `resolve matches SP names typed without the stored punctuation`() {
+        assertEquals("1213", HsrCharacterService.resolve("dan heng lua imbibitora", chars))
+    }
+
+    @Test
     fun `charactersIn requires whole words — no substring hits`() {
         // "acheronte" must not fire "Acheron" (the roster guard's "cora/coração" lesson).
         assertTrue(HsrCharacterService.charactersIn("o acheronte da mitologia", chars).isEmpty())

@@ -243,8 +243,10 @@ class KnowledgeGrounder(
          * Pure, so the routing is unit-testable without tools.
          */
         internal fun wantsWeb(query: String): Boolean {
+            // Version numbers scan the RAW query: normalize folds punctuation, turning "3.5"
+            // into "3 5" before the regex could see it.
+            if (VERSION_NUMBER.containsMatchIn(query)) return true
             val norm = HsrCharacterService.normalize(query)
-            if (VERSION_NUMBER.containsMatchIn(norm)) return true
             return norm.split(TOKEN_SEP).any { t ->
                 t in WEB_CUE_TOKENS || WEB_CUE_PREFIXES.any { p -> t.startsWith(p) }
             }
@@ -259,7 +261,7 @@ class KnowledgeGrounder(
          * so the original question just gets the EN news terms appended. Pure.
          */
         internal fun newsQuery(query: String, characterEnNames: List<String>): String {
-            val versions = VERSION_NUMBER.findAll(HsrCharacterService.normalize(query)).map { it.value }
+            val versions = VERSION_NUMBER.findAll(query).map { it.value }
             val anchors = (characterEnNames.filter { it.isNotBlank() } + versions).distinct()
             return if (anchors.isEmpty()) "$query new announcement leak"
             else anchors.joinToString(" ") + " new announcement leak"

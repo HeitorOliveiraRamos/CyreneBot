@@ -37,6 +37,32 @@ class GameKnowledgeToolsTest {
     }
 
     @Test
+    fun `matchNames prefers the SP form over the base character it contains`() {
+        val forms = listOf("Robin", "Robin • Summeretto", "Dan Heng", "Dan Heng - Embebidor Lunae")
+        // The SP name is stored with a separator nobody types — it must still win alone.
+        assertEquals(
+            listOf("Robin • Summeretto"),
+            GameKnowledgeTools.matchNames("qual a build da robin summeretto?", forms),
+        )
+        assertEquals(
+            listOf("Dan Heng - Embebidor Lunae"),
+            GameKnowledgeTools.matchNames("kit do dan heng embebidor lunae", forms),
+        )
+        // The base name alone still anchors the base character.
+        assertEquals(listOf("Robin"), GameKnowledgeTools.matchNames("quem é a robin?", forms))
+        // Naming both fires both — the bare mention sits outside the SP name's span.
+        assertEquals(
+            listOf("Robin • Summeretto", "Robin"),
+            GameKnowledgeTools.matchNames("compara a robin com a robin summeretto", forms),
+        )
+        // Same character ingested with different separators: both stored names match.
+        assertEquals(
+            listOf("Himeko - Nova", "Himeko • Nova"),
+            GameKnowledgeTools.matchNames("quem é a himeko nova?", listOf("Himeko", "Himeko - Nova", "Himeko • Nova")),
+        )
+    }
+
+    @Test
     fun `matchNames skips short names, nulls and caps the result`() {
         assertTrue(GameKnowledgeTools.matchNames("yu é bom?", names).isEmpty())
         val many = (1..6).map { "Personagem Número $it" }

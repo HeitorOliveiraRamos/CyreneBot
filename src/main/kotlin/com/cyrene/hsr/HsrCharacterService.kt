@@ -141,10 +141,19 @@ class HsrCharacterService(
         const val STALE_DAYS = 30L
 
         private val DIACRITICS = Regex("\\p{M}+")
+        private val NON_ALNUM = Regex("[^\\p{L}\\p{N}]+")
 
-        /** Accent/case-insensitive form so "marco" finds "Março 7" and "acheron" finds "Acheron". */
+        /**
+         * Accent/case/punctuation-insensitive form so "marco" finds "Março 7" and a user typing
+         * "dan heng embebidor lunae" finds "Dan Heng - Embebidor Lunae" — multi-form ("SP")
+         * names are stored with "•"/"-"/":" separators nobody types, so punctuation folds to
+         * a single space instead of surviving into the comparison.
+         */
         fun normalize(s: String): String =
-            DIACRITICS.replace(Normalizer.normalize(s.trim().lowercase(), Normalizer.Form.NFKD), "")
+            NON_ALNUM.replace(
+                DIACRITICS.replace(Normalizer.normalize(s.lowercase(), Normalizer.Form.NFKD), ""),
+                " ",
+            ).trim()
 
         /**
          * Pure matching core of [resolveId]: exact normalized match on any language first,
@@ -171,17 +180,51 @@ class HsrCharacterService(
 
         /**
          * Pure core of [findInText]: characters with at least one name (≥4 normalized chars,
-         * not stoplisted) present in [text] as a whole word. Whole-word matters for the same
-         * reason as the roster guard's: "cora" must not fire inside "coração".
+         * not stoplisted) present in [text] as a whole word, longest name winning its span —
+         * "dan heng embebidor lunae" fires ONLY the Embebidor form, not base Dan Heng too.
+         * Whole-word matters for the same reason as the roster guard's: "cora" must not fire
+         * inside "coração".
          */
         internal fun charactersIn(text: String, chars: Collection<HsrCharacter>): List<HsrCharacter> {
+            val eligible = chars.flatMap { c -> c.names.filter { normalize(it) !in NAME_STOPLIST } }
+            val matched = matchLongest(text, eligible).toSet()
+            return chars.filter { c -> c.names.any { it in matched } }
+        }
+
+        /**
+         * Whole-word matches of [names] (≥4 normalized chars) in [text], longest name first,
+         * each match claiming every span it occupies: a name that only occurs INSIDE an
+         * already-claimed span is not a match. This is what keeps a base character from
+         * co-firing on its own SP form — "Robin" is a sub-phrase of "Robin • Summeretto" —
+         * while "compara a robin com a robin summeretto" still fires both (the bare "robin"
+         * sits outside the claimed span). Names normalizing identically all match together
+         * (the KB stores "Himeko - Nova" and "Himeko • Nova" from different sources).
+         * Returns raw names, most specific (longest) first. Pure.
+         */
+        internal fun matchLongest(text: String, names: Collection<String>): List<String> {
             val t = normalize(text)
             if (t.isEmpty()) return emptyList()
-            return chars.filter { c ->
-                c.names.any { n ->
-                    val nn = normalize(n)
-                    nn.length >= 4 && nn !in NAME_STOPLIST && containsWord(t, nn)
-                }
+            val byNorm = names.distinct().groupBy(::normalize).filterKeys { it.length >= 4 }
+            val claimed = mutableListOf<IntRange>()
+            val matched = mutableListOf<String>()
+            for ((norm, raws) in byNorm.entries.sortedByDescending { it.key.length }.map { it.toPair() }) {
+                val spans = wordSpans(t, norm).filter { s -> claimed.none { it.first <= s.last && s.first <= it.last } }
+                if (spans.isEmpty()) continue
+                claimed += spans
+                matched += raws
+            }
+            return matched
+        }
+
+        /** Every whole-word span of [word] in already-normalized [text]. */
+        private fun wordSpans(text: String, word: String): List<IntRange> = buildList {
+            var i = text.indexOf(word)
+            while (i >= 0) {
+                val end = i + word.length
+                val beforeOk = i == 0 || !text[i - 1].isLetterOrDigit()
+                val afterOk = end >= text.length || !text[end].isLetterOrDigit()
+                if (beforeOk && afterOk) add(i until end)
+                i = text.indexOf(word, i + 1)
             }
         }
 
