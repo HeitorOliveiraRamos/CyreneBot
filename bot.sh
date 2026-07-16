@@ -46,17 +46,20 @@ require_env() {
   : "${OLLAMA_BASE_URL:=http://localhost:11434}"
 }
 
+# Aceita qualquer JDK >= 21 (bytecode alvo é 21; ver <java.version> no pom.xml)
+java_ge_21() { [ "$("$1" -version 2>&1 | sed -n 's/.*version "\([0-9]*\).*/\1/p')" -ge 21 ] 2>/dev/null; }
+
 resolve_java() {
   local jh
-  if jh="$(/usr/libexec/java_home -v 21 2>/dev/null)"; then          # macOS
+  if jh="$(/usr/libexec/java_home -v 21+ 2>/dev/null)"; then         # macOS: 21 ou mais novo
     export JAVA_HOME="$jh"
-  elif [ -n "${JAVA_HOME:-}" ] && "$JAVA_HOME/bin/java" -version 2>&1 | grep -q 'version "21'; then
-    export JAVA_HOME                                                 # JAVA_HOME já aponta pro 21
-  elif command -v java >/dev/null 2>&1 && java -version 2>&1 | grep -q 'version "21'; then
-    # java 21 no PATH — deriva JAVA_HOME dele (sobrescreve um JAVA_HOME antigo que o mvn usaria)
+  elif [ -n "${JAVA_HOME:-}" ] && java_ge_21 "$JAVA_HOME/bin/java"; then
+    export JAVA_HOME                                                 # JAVA_HOME já serve
+  elif command -v java >/dev/null 2>&1 && java_ge_21 java; then
+    # java >= 21 no PATH — deriva JAVA_HOME dele (sobrescreve um JAVA_HOME antigo que o mvn usaria)
     export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")"
   else
-    err "JDK 21 não encontrado (Kotlin 2.1.0 exige)."
+    err "JDK 21+ não encontrado."
     echo "  macOS: brew install --cask corretto@21" >&2
     echo "  Linux: apt install openjdk-21-jdk (ou equivalente) e/ou aponte JAVA_HOME pra ele" >&2
     exit 1
