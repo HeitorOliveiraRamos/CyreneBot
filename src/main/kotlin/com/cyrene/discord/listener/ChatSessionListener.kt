@@ -118,16 +118,22 @@ class ChatSessionListener(
                 // Single completion handler so the gate permit is released exactly once.
                 .whenComplete { result, ex ->
                     try {
-                        if (ex != null) {
-                            log.error("Failed to process chat-session message for conv {}", conversationId, ex)
-                            message.reply(BotMessages.ERROR).queue()
-                        } else {
-                            val (contentForAi, reply) = result
-                            val persisted = conversations.recordExchange(conversationId, contentForAi, reply)
-                            if (!persisted) {
-                                log.debug("Skipped recording exchange for conv {} — no longer active", conversationId)
+                        when {
+                            // Cancelled via the status button: nothing to send, and the
+                            // aborted exchange is deliberately not persisted.
+                            progress.isCancelled -> {}
+                            ex != null -> {
+                                log.error("Failed to process chat-session message for conv {}", conversationId, ex)
+                                message.reply(BotMessages.ERROR).queue()
                             }
-                            sender.replyLong(message, reply)
+                            else -> {
+                                val (contentForAi, reply) = result
+                                val persisted = conversations.recordExchange(conversationId, contentForAi, reply)
+                                if (!persisted) {
+                                    log.debug("Skipped recording exchange for conv {} — no longer active", conversationId)
+                                }
+                                sender.replyLong(message, reply)
+                            }
                         }
                     } finally {
                         progress.close()

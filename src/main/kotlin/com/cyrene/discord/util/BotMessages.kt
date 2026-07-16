@@ -65,6 +65,36 @@ object BotMessages {
     const val STATUS_WEB = "🌐 Não tinha tudo na base, pesquisando na internet…"
     const val STATUS_MODERATION = "🛠️ Deixa comigo, já estou cuidando disso…"
     const val STATUS_WRITING = "✍️ Só um instante, organizando a resposta…"
+    const val STATUS_REDO = "🔄 Deixa eu repensar essa resposta…"
+
+    /** The requester pressed Cancelar on a live status message. */
+    const val CANCELLED = "Tudo bem! Cancelando..."
+
+    /** A cancel/redo button pressed by someone other than the user who asked. */
+    const val NOT_YOUR_BUTTON = "Esse botão é só pra quem me chamou 😉"
+
+    /** 🔄 pressed on an answer whose original request message is gone. */
+    const val REDO_ORIGINAL_GONE =
+        "Não achei mais a mensagem que pediu essa resposta, então não consigo refazê-la 😔"
+
+    /** 🔄 pressed again while the same answer is already being redone. */
+    const val REDO_IN_PROGRESS = "Calma! Ainda estou refazendo essa resposta 💜"
+
+    /**
+     * Canned openers for a code-rendered answer (build/kit paths) — the FALLBACK when the
+     * greeting model fails or emits junk, so the deterministic path never blocks on the
+     * LLM. Picked by [seed] (the query's hash): same question, same opener.
+     */
+    private val ANSWER_OPENERS = listOf(
+        "Anota aí%s 💜",
+        "Deixa comigo%s — tá tudo aqui na minha base:",
+        "Boa pergunta%s, olha só:",
+    )
+
+    fun answerOpener(name: String?, seed: Int): String {
+        val who = name?.trim()?.takeIf { it.isNotEmpty() }?.let { ", $it" } ?: ""
+        return ANSWER_OPENERS[Math.floorMod(seed, ANSWER_OPENERS.size)].format(who)
+    }
 
     /**
      * HSR knowledge question where no real source (local base nor web) backed the answer.

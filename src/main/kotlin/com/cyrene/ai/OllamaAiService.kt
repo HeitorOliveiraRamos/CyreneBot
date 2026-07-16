@@ -7,7 +7,9 @@ import com.cyrene.discord.tools.DiscordToolContext
 import com.cyrene.discord.util.BotMessages
 import com.cyrene.hsr.HsrCharacterService
 import com.cyrene.knowledge.AnswerCache
+import com.cyrene.knowledge.BuildAnswerService
 import com.cyrene.knowledge.Grounding
+import com.cyrene.knowledge.KitAnswerService
 import com.cyrene.knowledge.KnowledgeGrounder
 import com.cyrene.skills.SkillTools
 import org.slf4j.LoggerFactory
@@ -52,6 +54,8 @@ class OllamaAiService(
     private val characters: HsrCharacterService,
     private val answerCache: AnswerCache,
     private val skillTools: SkillTools,
+    private val buildAnswers: BuildAnswerService,
+    private val kitAnswers: KitAnswerService,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -112,6 +116,38 @@ class OllamaAiService(
     }
 
     /**
+     * "Refazer" path: produce a better version of the answer the bot already gave for the
+     * last user turn in [history]. Tool-less by construction — the brain pass never runs
+     * here, so a redo can never repeat a moderation action (a re-run purge would delete
+     * MORE messages). KNOWLEDGE questions re-ground from scratch with the answer cache
+     * skipped (a cache hit would return the identical text — the opposite of a redo; the
+     * improved answer then upserts over the cached one). Everything else re-rolls the
+     * conversational voice with the previous answer appended as its own turn plus an
+     * explicit "rewrite it better" user turn — ending on a user turn, not the assistant
+     * one, so the model rewrites instead of continuing the old text.
+     */
+    fun redoAnswer(
+        history: List<ConversationMessage>,
+        previousAnswer: String,
+        userName: String?,
+        progress: (String) -> Unit,
+    ): String {
+        val intent = classifyIntent(history)
+        if (intent == Intent.KNOWLEDGE) {
+            return runKnowledgePipeline(history, REDO_KNOWLEDGE_NOTE, userName, progress, skipCache = true)
+        }
+        val redoHistory = history + listOf(
+            ConversationMessage(conversationId = 0L, role = MessageRole.ASSISTANT, content = previousAnswer),
+            ConversationMessage(
+                conversationId = 0L,
+                role = MessageRole.USER,
+                content = "Refaz sua última resposta, tenta deixar ela melhor.",
+            ),
+        )
+        return runVoicePassConversational(redoHistory, REDO_CHAT_NOTE, userName).ifBlank { previousAnswer }
+    }
+
+    /**
      * Direct entry into the KNOWLEDGE pipeline for the `/hsr` slash command. Skips the
      * intent gate (a /hsr question is HSR by definition, so it can never be misrouted as
      * chat) and never touches the tool-aware brain — same guarantees as a routed
@@ -140,17 +176,35 @@ class OllamaAiService(
         extraSystemPrompt: String?,
         userName: String?,
         progress: (String) -> Unit,
+        skipCache: Boolean = false,
     ): String {
         val question = history.lastOrNull { it.role == MessageRole.USER }?.content?.trim().orEmpty()
         val searchQuery = condenseFollowUp(history, question)
 
+        // Deterministic paths: build-facet and specific-ability/eidolon questions about
+        // characters the KB has docs for are rendered by code (BuildAnswerService /
+        // KitAnswerService) — no retrieval ranking, no voice retell, no verifier, so the
+        // layout is identical every time and a fact can never migrate between items. The
+        // model's only job is the one-line greeting on top ([greetingLine], user request
+        // 2026-07-16 — canned fallback if it fails). Sits BEFORE the cache so stale
+        // model-written answers can't mask it; the body is not cached itself (~ms render).
+        buildAnswers.answer(searchQuery)?.let {
+            return greeted(it, question, userName, "build_render", progress)
+        }
+        kitAnswers.answer(searchQuery)?.let {
+            return greeted(it, question, userName, "kit_render", progress)
+        }
+
         // Answer cache: a repeat question (exact normalized match) skips retrieval, voice
         // AND verify. Only grounded/verified answers ever get stored, so a hit is as safe
-        // as the pipeline run that produced it.
-        answerCache.get(searchQuery)?.let {
-            metrics.count("cyrene.knowledge", "result", "cache_hit")
-            log.debug("Knowledge cache hit for '{}'", searchQuery)
-            return it
+        // as the pipeline run that produced it. A redo skips the lookup (it exists to
+        // produce a DIFFERENT text) but still upserts its result below.
+        if (!skipCache) {
+            answerCache.get(searchQuery)?.let {
+                metrics.count("cyrene.knowledge", "result", "cache_hit")
+                log.debug("Knowledge cache hit for '{}'", searchQuery)
+                return it
+            }
         }
 
         progress(BotMessages.STATUS_KNOWLEDGE)
@@ -197,6 +251,61 @@ class OllamaAiService(
         }
         answerCache.put(searchQuery, answer, grounding.source, userName)
         return answer
+    }
+
+    /**
+     * Wraps a code-rendered [body] (build/kit path) with a model-written greeting line.
+     * The body is final and untouchable — the model never sees it, so it physically
+     * cannot corrupt the data; it only reacts to the [question] in persona.
+     */
+    private fun greeted(
+        body: String,
+        question: String,
+        userName: String?,
+        metric: String,
+        progress: (String) -> Unit,
+    ): String {
+        metrics.count("cyrene.knowledge", "result", metric)
+        progress(BotMessages.STATUS_WRITING)
+        return "${greetingLine(question, userName)}\n\n$body"
+    }
+
+    /**
+     * One in-persona opening line for a code-rendered body. The model sees ONLY the
+     * subject (character names), never the question — given the question, the live smoke
+     * test had GAIA fabricating mechanics in the opener ("a ult te joga pro inferno"),
+     * the exact failure this path exists to kill; without it there is nothing to fake.
+     * Runs on the BRAIN model, not GAIA: 14b followed the one-line contract 8/8 while
+     * GAIA ran past the opener into invented data 2/4 — and the brain is already hot
+     * here (the intent gate just ran on it), so it's the faster choice too. Tiny token
+     * budget; ANY failure or fishy output falls back to the canned opener.
+     */
+    private fun greetingLine(question: String, userName: String?): String {
+        val fallback = { BotMessages.answerOpener(userName, question.hashCode()) }
+        val subject = characters.findInText(question)
+            .mapNotNull { it.namePt ?: it.nameEn }.distinct().joinToString(" e ")
+            .ifBlank { "Honkai: Star Rail" }
+        val messages = promptBuilder.build(
+            history = listOf(
+                ConversationMessage(
+                    conversationId = 0L,
+                    role = MessageRole.USER,
+                    content = "[assunto da pergunta: $subject]",
+                ),
+            ),
+            extraSystemPrompt = GREETING_INSTRUCTIONS,
+            overrideOnly = false,
+            userName = userName,
+        )
+        return try {
+            val raw = metrics.timePass("voice_greeting") {
+                chatModel.call(Prompt(messages, greetingOptions())).result.output.text
+            } ?: ""
+            sanitizeGreeting(postProcessor.process(raw)) ?: fallback()
+        } catch (e: Exception) {
+            log.warn("Greeting pass failed; using canned opener", e)
+            fallback()
+        }
     }
 
     /**
@@ -633,6 +742,18 @@ class OllamaAiService(
             .keepAlive(properties.performance.keepAlive)
             .build()
 
+    /** Greeting-line options: the BRAIN model (hot + obedient — see [greetingLine])
+     *  with a one-line token budget. */
+    private fun greetingOptions(): OllamaOptions =
+        OllamaOptions.builder()
+            .model(properties.brainModelName)
+            .temperature(properties.performance.voiceTemperature)
+            .numCtx(properties.performance.numCtx)
+            .numPredict(48)
+            .numThread(properties.performance.numThread)
+            .keepAlive(properties.performance.keepAlive)
+            .build()
+
     /**
      * Voice options for the knowledge path: the BRAIN model, not the conversational
      * voice model. Deliberate (user decision 2026-07-09): the brain is already resident
@@ -985,6 +1106,58 @@ class OllamaAiService(
 
             Responda APENAS com JSON neste formato: {"veredito": "sim"} ou {"veredito": "nao"}.
             Nada mais.
+        """.trimIndent()
+
+        /** System note for a knowledge redo: same grounded pipeline, just asked to try harder.
+         *  Deliberately does NOT include the previous answer — a possibly-flawed old draft
+         *  must not pollute a pipeline whose contract is "the retrieved data is ALL you know". */
+        val REDO_KNOWLEDGE_NOTE = """
+            O usuário pediu uma VERSÃO MELHOR da resposta que você já deu sobre isso.
+            Capriche nesta: mais clara, mais completa e melhor organizada. Não mencione
+            que está refazendo — apenas entregue a nova resposta.
+        """.trimIndent()
+
+        /**
+         * Greeting pass for code-rendered (build/kit) answers: the persona writes ONE
+         * opening line announcing the delivered answer; the factual body is appended by
+         * code afterwards. The model is told only the SUBJECT, never the question or the
+         * data (see [greetingLine] for why). Tone examples anchor the delivery shape —
+         * the same "copy the tone, not the words" trick the persona file uses.
+         */
+        val GREETING_INSTRUCTIONS = """
+            ## Sua tarefa agora
+
+            O usuário fez uma pergunta técnica de Honkai: Star Rail e a resposta factual
+            já está pronta — ela será colada logo abaixo da SUA linha. Escreva APENAS UMA
+            linha curta de abertura em personagem entregando essa resposta.
+
+            Regras:
+            - A linha ANUNCIA que aqui está o que a pessoa pediu. NÃO faça pergunta de volta.
+            - NÃO comente o jogo, NÃO dê opinião sobre personagem, NÃO invente dados.
+            - Uma linha só, sem listas, sem markdown, sem aspas.
+
+            Exemplos do tom (copie o tom, não as palavras):
+            - "Fui lá buscar pra você, amor. Olha só:"
+            - "Anotado e entregue, {nome} — do jeitinho que você pediu:"
+            - "Isso eu tenho na ponta da língua. Segura:"
+        """.trimIndent()
+
+        /**
+         * First non-blank line of the greeting output, unquoted, or null when it's
+         * unusable: blank, list/heading-shaped, or longer than a one-liner has any
+         * business being — the length cap is the tell for the observed failure mode
+         * where the model runs past the opener into an invented answer on the SAME
+         * line. Null → canned opener. Pure.
+         */
+        internal fun sanitizeGreeting(raw: String): String? =
+            raw.lineSequence().map { it.trim().trim('"', '“', '”') }.firstOrNull(String::isNotEmpty)
+                ?.takeIf { it.length <= 160 && !it.startsWith("-") && !it.startsWith("*") && !it.startsWith("#") }
+
+        /** System note for a conversational redo: rewrite the last answer, no meta commentary. */
+        val REDO_CHAT_NOTE = """
+            O usuário pediu para você REFAZER sua última resposta acima. Escreva uma versão
+            nova e melhor — não repita o texto anterior palavra por palavra e não comente
+            que está refazendo; apenas entregue a resposta nova.
         """.trimIndent()
 
         /** Sentinel returned by the brain when the user's message needs no tool action

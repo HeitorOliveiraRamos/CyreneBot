@@ -153,11 +153,15 @@ class MentionReplyListener(
                 // whether the pipeline succeeded or threw.
                 .whenComplete { reply, ex ->
                     try {
-                        if (ex != null) {
-                            log.error("MentionReplyListener failed", ex)
-                            event.message.reply(BotMessages.ERROR).queue()
-                        } else {
-                            sender.replyLong(event.message, reply)
+                        when {
+                            // Cancelled via the status button: the "Cancelando..." line
+                            // (kept by progress.close()) is the whole outcome.
+                            progress.isCancelled -> {}
+                            ex != null -> {
+                                log.error("MentionReplyListener failed", ex)
+                                event.message.reply(BotMessages.ERROR).queue()
+                            }
+                            else -> sender.replyLong(event.message, reply)
                         }
                     } finally {
                         progress.close()

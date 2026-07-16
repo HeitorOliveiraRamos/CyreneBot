@@ -204,6 +204,20 @@ class OllamaAiServiceRoutingTest {
     }
 
     @Test
+    fun `sanitizeGreeting unquotes one line and rejects run-ons and structure`() {
+        // The happy path: one quoted line, as the models actually emit it.
+        assertEquals(
+            "Fui lá buscar pra você, amor. Olha só:",
+            OllamaAiService.sanitizeGreeting("\"Fui lá buscar pra você, amor. Olha só:\"\n"),
+        )
+        // Observed failure: opener runs into an invented answer on the SAME line → too long.
+        assertEquals(null, OllamaAiService.sanitizeGreeting("Anotado, amor: a composição é ${"x".repeat(160)}"))
+        // Blank and list/heading-shaped output → canned fallback.
+        assertEquals(null, OllamaAiService.sanitizeGreeting("   \n  "))
+        assertEquals(null, OllamaAiService.sanitizeGreeting("- Relíquia A\n- Relíquia B"))
+    }
+
+    @Test
     fun `fastPathIntent returns null (defer to the LLM gate) for anything non-trivial`() {
         // Crucially, a moderation or HSR request must NEVER be fast-pathed.
         for (msg in listOf(

@@ -79,7 +79,11 @@ class KnowledgeGrounder(
         //           WebSearchClient.htmlToText → cap at webFetchCharLimit
         // Return the same Grounding contract (add Source.FANDOM) and the roster guard,
         // verifier and answer cache all apply to it for free.
-        val webFirst = wantsWeb(query)
+        // Entity names are invisible to the news cues: "Himeko Nova" contains the recency
+        // word "nova", but a character NAME is exactly what the local KB is authoritative
+        // for — without the strip, every question about her routed web-first.
+        val entityNames = tools.kbNames() + characters.findInText(query).flatMap { it.names }
+        val webFirst = wantsWeb(query, entityNames)
         if (webFirst) {
             log.debug("Web-first grounding for '{}' (news/explicit-search cue)", query)
             groundWeb(query, newsQuery(query, characters.findInText(query).mapNotNull { it.nameEn }), recent = true, onWebSearch)?.let { return it }
@@ -237,16 +241,18 @@ class KnowledgeGrounder(
         /**
          * True when the question should be grounded on the WEB before the local KB: the user
          * explicitly asked for an internet search, or the subject is announced/leaked/new/
-         * versioned content a static KB can't know. Deliberately broad — this replaces the
-         * "searchWeb even if lookupHsr hit" rule the old brain prompt had, and a false
-         * positive only reorders the tiers (local remains the fallback), never loses data.
-         * Pure, so the routing is unit-testable without tools.
+         * versioned content a static KB can't know. Known [entityNames] are stripped before
+         * the cue scan — the "nova" in "Himeko Nova" is a character the KB knows, not recency
+         * talk; the same word standing alone ("teve personagem nova?") still cues. Deliberately
+         * broad — this replaces the "searchWeb even if lookupHsr hit" rule the old brain prompt
+         * had, and a false positive only reorders the tiers (local remains the fallback), never
+         * loses data. Pure, so the routing is unit-testable without tools.
          */
-        internal fun wantsWeb(query: String): Boolean {
+        internal fun wantsWeb(query: String, entityNames: Collection<String> = emptyList()): Boolean {
             // Version numbers scan the RAW query: normalize folds punctuation, turning "3.5"
             // into "3 5" before the regex could see it.
             if (VERSION_NUMBER.containsMatchIn(query)) return true
-            val norm = HsrCharacterService.normalize(query)
+            val norm = HsrCharacterService.stripNames(query, entityNames)
             return norm.split(TOKEN_SEP).any { t ->
                 t in WEB_CUE_TOKENS || WEB_CUE_PREFIXES.any { p -> t.startsWith(p) }
             }

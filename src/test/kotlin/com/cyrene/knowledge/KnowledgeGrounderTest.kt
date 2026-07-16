@@ -59,6 +59,18 @@ class KnowledgeGrounderTest {
     }
 
     @Test
+    fun `wantsWeb ignores recency words that are part of a known entity name`() {
+        val names = listOf("Himeko", "Himeko • Nova", "Robin", "Robin • Summeretto")
+        // "nova" here IS the character — the KB is authoritative, no web-first detour.
+        assertFalse(KnowledgeGrounder.wantsWeb("quem é a himeko nova?", names))
+        assertFalse(KnowledgeGrounder.wantsWeb("qual a build da himeko nova?", names))
+        // The same word standing OUTSIDE the name still cues recency.
+        assertTrue(KnowledgeGrounder.wantsWeb("saiu uma personagem nova, a himeko nova?", names))
+        // Cues elsewhere in the sentence are untouched by the strip.
+        assertTrue(KnowledgeGrounder.wantsWeb("teve leak do banner da himeko nova?", names))
+    }
+
+    @Test
     fun `entitySubjects extracts a single name from a bare who-is question`() {
         assertEquals(listOf("lilita"), KnowledgeGrounder.entitySubjects("quem é lilita?"))
         assertEquals(listOf("acheron"), KnowledgeGrounder.entitySubjects("quem e a Acheron").map { it.lowercase() })

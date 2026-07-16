@@ -216,6 +216,24 @@ class HsrCharacterService(
             return matched
         }
 
+        /**
+         * Normalized [text] with every whole-word occurrence of [names] blanked out, longest
+         * name first ("Himeko • Nova" is removed as a phrase BEFORE bare "Himeko" could break
+         * it apart and orphan "nova"). Used to keep entity names out of keyword scans — the
+         * "nova" in "himeko nova" is a character, not a recency cue — while the same word
+         * standing alone elsewhere in the text survives. Pure.
+         */
+        internal fun stripNames(text: String, names: Collection<String>): String {
+            var t = normalize(text)
+            val norms = names.map(::normalize).filter { it.length >= 4 }.distinct().sortedByDescending { it.length }
+            for (n in norms) {
+                for (span in wordSpans(t, n)) {
+                    t = t.replaceRange(span, " ".repeat(n.length))
+                }
+            }
+            return t
+        }
+
         /** Every whole-word span of [word] in already-normalized [text]. */
         private fun wordSpans(text: String, word: String): List<IntRange> = buildList {
             var i = text.indexOf(word)

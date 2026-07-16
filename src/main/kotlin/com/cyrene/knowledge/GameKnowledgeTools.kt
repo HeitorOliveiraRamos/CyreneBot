@@ -129,11 +129,7 @@ class GameKnowledgeTools(
      * sub-ms seq read over ~1k rows — no index or cache needed at this KB size.
      */
     private fun nameAnchoredDocs(query: String): List<Map<String, Any?>> {
-        val names = jdbc.queryForList(
-            "SELECT DISTINCT metadata->>'name' FROM vector_store WHERE metadata->>'name' IS NOT NULL",
-            String::class.java,
-        )
-        val matched = matchNames(query, names)
+        val matched = matchNames(query, kbNames())
         if (matched.isEmpty()) return emptyList()
         val placeholders = matched.joinToString(",") { "?" }
         return jdbc.queryForList(
@@ -150,11 +146,26 @@ class GameKnowledgeTools(
     }
 
     /**
+     * Every entity name carried in KB doc metadata. Sub-ms seq read over ~1k rows; fail-open
+     * so a DB hiccup can't take the caller down with it (callers treat [] as "no names").
+     */
+    internal fun kbNames(): List<String> = try {
+        jdbc.queryForList(
+            "SELECT DISTINCT metadata->>'name' FROM vector_store WHERE metadata->>'name' IS NOT NULL",
+            String::class.java,
+        )
+    } catch (e: Exception) {
+        log.warn("kbNames scan failed: {}", e.message)
+        emptyList()
+    }
+
+    /**
      * relic_set / light_cone docs for the items named inside retrieved build docs, skipping
      * any already present in [results]. Exact-name lookup: build docs and item docs are
      * rendered from the same nanoka index files, so the names match verbatim. Fail-open.
+     * Internal so [BuildAnswerService] reuses the same join for its deterministic renders.
      */
-    private fun effectDocs(results: List<Map<String, Any?>>): List<Map<String, Any?>> {
+    internal fun effectDocs(results: List<Map<String, Any?>>): List<Map<String, Any?>> {
         val wanted = results.filter { it["category"] == "build" }
             .flatMap { buildItemNames(it["content"] as? String ?: "") }
             .distinct()
@@ -237,19 +248,26 @@ class GameKnowledgeTools(
 
         private val TOKEN_SEP = Regex("[^\\p{L}\\p{N}]+")
 
-        /** "e2" / "eidolon 2" in a normalized query → the eidolon number asked about. */
-        private val EIDOLON_NUM = Regex("\\b(?:e|eidolon\\s*)([1-6])\\b")
+        /** "e2" / "eidolon 2" in a normalized query → the eidolon number asked about.
+         *  Internal so [KitAnswerService] parses the same player shorthand. */
+        internal val EIDOLON_NUM = Regex("\\b(?:e|eidolon\\s*)([1-6])\\b")
 
         /** Build-doc lines that list equipment by name (labels from NanokaIngestionSource.buildDoc). */
-        private val ITEM_LINES = listOf("Relíquias", "Ornamento Planar", "Cone de Luz")
+        internal val ITEM_LINES = listOf("Relíquias", "Ornamento Planar", "Cone de Luz")
+
+        /** Every labeled line a build doc can carry — the render/parse contract with
+         *  [NanokaIngestionSource.buildDoc], shared with [BuildAnswerService]. */
+        internal val BUILD_LINE_LABELS =
+            ITEM_LINES + listOf("Main stats", "Substats", "Equipe recomendada")
 
         /**
          * Build-doc line labels (from [NanokaIngestionSource.buildDoc]) keyed by the
          * normalized facet words that ask for them. Slot words (esfera/corda/bola) keep
          * the ornament line AND the stat lines — the question may mean either. Words that
-         * cue nothing here ("build", "efeito", "quem é") leave the doc whole.
+         * cue nothing here ("build", "efeito", "quem é") leave the doc whole. Internal so
+         * [BuildAnswerService] routes on the exact same facet vocabulary.
          */
-        private val LINE_CUES: Map<String, Set<String>> = listOf(
+        internal val LINE_CUES: Map<String, Set<String>> = listOf(
             setOf("Equipe recomendada") to "equipe equipes team teams time times",
             setOf("Relíquias") to "reliquia reliquias relic relics set sets",
             setOf("Ornamento Planar") to "ornamento ornamentos ornament ornaments",
