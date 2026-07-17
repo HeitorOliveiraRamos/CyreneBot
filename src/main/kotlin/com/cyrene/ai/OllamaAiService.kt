@@ -355,11 +355,12 @@ class OllamaAiService(
             return it
         }
 
-        // Gazetteer fast-path: a question-shaped message naming a known HSR character (any
-        // language, from the hsr_character cache) with no moderation cue routes straight to
-        // KNOWLEDGE — the single most common non-chat mention, now LLM-free. KNOWLEDGE is
-        // tool-less (deterministic grounding), so a false hit can never moderate anyone;
-        // any moderation cue defers to the LLM gate instead.
+        // Gazetteer fast-path: a message naming a known HSR character (any language, from
+        // the hsr_character cache) PLUS an explicit mechanics word (kit/build/cone/…) with
+        // no moderation cue routes straight to KNOWLEDGE, LLM-free. Anything softer — a
+        // bare '?', a generic question word, banter — defers to the LLM gate, which sees
+        // conversation context and can keep a joke in chat. KNOWLEDGE is tool-less
+        // (deterministic grounding), so a false hit can never moderate anyone.
         gazetteerFastPath(lastUser) { characters.findInText(it).isNotEmpty() }?.let {
             metrics.count("cyrene.llm.fastpath", "result", "gazetteer")
             if (log.isDebugEnabled) log.debug("Gazetteer fast-path (no LLM) → {}", it)
@@ -373,7 +374,7 @@ class OllamaAiService(
             .joinToString("\n\n")
         val messages = listOf(
             SystemMessage(gateSystem),
-            UserMessage("Mensagem: $lastUser\nResposta:"),
+            UserMessage(gateUserBlock(history, lastUser)),
         )
         return try {
             val response = metrics.timePass("intent_gate") { chatModel.call(Prompt(messages, intentGateOptions())) }
@@ -954,35 +955,57 @@ class OllamaAiService(
         )
 
         /**
-         * Words/shapes that make a character mention look like a knowledge QUESTION rather
-         * than casual chat that happens to name a character ("a acheron é linda" must not
-         * fast-path). A '?' anywhere qualifies; otherwise one of the HSR-question tokens.
+         * Game-mechanics vocabulary that makes a character mention an unambiguous knowledge
+         * question. Deliberately NO generic question words ("quem", "qual", "como") and NO
+         * bare-'?' shape: "será que a Acheron me ama?" is a joke, not a kb question, and a
+         * false positive here bypasses the LLM gate straight into a build dump — the exact
+         * "joke killed by relic stats" failure. Ambiguous mentions defer to the LLM gate
+         * (return null), which costs one small hot-model call, never the joke.
          */
         private val KNOWLEDGE_CUES = setOf(
-            "quem", "qual", "quais", "como", "quando", "onde",
             "kit", "build", "builds", "cone", "cones", "eidolon", "eidolons",
             "reliquia", "reliquias", "time", "times", "sinergia", "elemento", "caminho",
             "habilidade", "habilidades", "talento", "tecnica", "ultimate", "ult",
-            "status", "banner", "lore", "farmar", "materiais",
+            "banner", "lore", "farmar", "materiais",
         )
 
         internal fun hasModerationCue(message: String): Boolean =
             message.contains("<@") || tokensOf(message).any { it in MOD_CUES }
 
         internal fun hasKnowledgeShape(message: String): Boolean =
-            message.contains('?') || tokensOf(message).any { it in KNOWLEDGE_CUES }
+            tokensOf(message).any { it in KNOWLEDGE_CUES }
 
         /**
-         * Gazetteer fast-path decision. Fires KNOWLEDGE only when the message is question-
-         * shaped, carries no moderation cue, and [mentionsCharacter] confirms a known HSR
-         * character name; anything else returns null (defer to the LLM gate — exactly the
-         * old behaviour). The character lookup is a lambda so this stays pure and testable
-         * without the DB-backed service.
+         * Gazetteer fast-path decision. Fires KNOWLEDGE only when the message carries an
+         * explicit game-mechanics cue ([KNOWLEDGE_CUES]), no moderation cue, and
+         * [mentionsCharacter] confirms a known HSR character name; anything else returns
+         * null (defer to the LLM gate). A bare question mark or generic question word is
+         * NOT enough — banter naming a character must reach the LLM gate, which sees
+         * conversation context and can route it to chat. The character lookup is a lambda
+         * so this stays pure and testable without the DB-backed service.
          */
         internal fun gazetteerFastPath(message: String, mentionsCharacter: (String) -> Boolean): Intent? {
             val s = SPEAKER_PREFIX.replace(message.trim(), "")
             if (hasModerationCue(s) || !hasKnowledgeShape(s)) return null
             return if (mentionsCharacter(s)) Intent.KNOWLEDGE else null
+        }
+
+        /**
+         * User block for the gate prompt: the last user message plus up to two prior turns
+         * as labelled context. Banter is context-dependent — "e a acheron?" mid-joke reads
+         * nothing like the same words cold — and two truncated turns cost a few dozen
+         * tokens on the hot brain model. Pure, so the shape is unit-testable.
+         */
+        internal fun gateUserBlock(history: List<ConversationMessage>, lastUser: String): String {
+            val lastUserIdx = history.indexOfLast { it.role == MessageRole.USER }
+            val prior = if (lastUserIdx <= 0) emptyList() else history.subList(0, lastUserIdx).takeLast(2)
+            if (prior.isEmpty()) return "Mensagem: $lastUser\nResposta:"
+            val context = prior.joinToString("\n") { m ->
+                val who = if (m.role == MessageRole.USER) "Usuário" else "Bot"
+                "$who: ${m.content.take(200)}"
+            }
+            return "Conversa anterior (apenas contexto — classifique SÓ a última mensagem):\n" +
+                "$context\n\nMensagem: $lastUser\nResposta:"
         }
 
         /**
@@ -1023,28 +1046,35 @@ class OllamaAiService(
             - uma consulta a dados do Discord: info do servidor, contagem de membros,
               permissões, busca de membro por ID
 
-            Responda "kb" quando a mensagem faz uma pergunta sobre o jogo
-            Honkai: Star Rail (HSR) que precisa de dados precisos — INCLUSIVE pedidos de
-            recomendação/opinião que dependem de fatos do jogo (build, time, sinergia,
-            "vale a pena", "em quais personagens"):
-            - personagens, kits, habilidades, elementos, caminhos (Paths), Eidolons
-            - cones de luz (Light Cones), relíquias, builds, times, status, sinergias
-            - lore, história, mecânicas, versão/patch atual, banners, eventos
-            - recomendações que dependem do jogo: "qual o melhor cone pro Dan Heng?",
-              "em quais personagens esse set é melhor?", "vale a pena puxar a Acheron?",
-              "qual o melhor time pra ela?"
-            - exemplos diretos: "quem é a Acheron?", "que elemento é o Jing Yuan?",
-              "quando saiu a versão 3.0?"
+            Responda "kb" quando a mensagem PEDE DADOS do jogo Honkai: Star Rail (HSR):
+            - kits, habilidades, elementos, caminhos (Paths), Eidolons, status
+            - cones de luz (Light Cones), relíquias, builds, times, sinergias
+            - lore, história, mecânicas, versão/patch atual, banners, eventos, materiais
+            - recomendações que dependem desses dados: "qual o melhor cone pro Dan Heng?",
+              "vale a pena puxar a Acheron?", "qual o melhor time pra ela?"
+            - quem um personagem É: "quem é a Acheron?", "que elemento é o Jing Yuan?"
 
             Responda "chat" para QUALQUER outra coisa:
-            - saudações ("oi", "olá", "bom dia"), despedidas, agradecimentos
-            - perguntas sobre o bot ("qual seu nome?", "você é uma IA?")
-            - elogios, declarações, brincadeiras, papo aleatório
+            - saudações, despedidas, agradecimentos, perguntas sobre o bot
+            - elogios, declarações, flerte, brincadeiras, memes, papo aleatório
             - pedidos de história inventada, desabafo, conselho de vida
-            - opiniões que NÃO dependem de fatos do jogo (ex.: "qual sua cor favorita?")
+            - opiniões que NÃO dependem de fatos do jogo
 
-            Na dúvida entre "kb" e "chat" para algo de HSR, prefira SEMPRE "kb" — é melhor
-            consultar a base do que arriscar inventar um personagem ou status.
+            REGRA MAIS IMPORTANTE: citar um personagem NÃO é pedir dados. Piada, elogio,
+            flerte ou papo que só MENCIONA um personagem é "chat" — só é "kb" quando a
+            mensagem quer FATOS do jogo. Se a conversa anterior está em tom de brincadeira
+            e a mensagem continua a brincadeira, é "chat".
+
+            Exemplos:
+            - "quem é a Acheron?" → {"intent": "kb"}
+            - "qual o melhor cone pro Welt?" → {"intent": "kb"}
+            - "a Acheron é boa? vale a pena puxar?" → {"intent": "kb"}
+            - "a acheron é linda demais" → {"intent": "chat"}
+            - "será que a Acheron me ama?" → {"intent": "chat"}
+            - "imagina o Welt pagando boleto kkk" → {"intent": "chat"}
+            - "casa comigo igual a Firefly casaria?" → {"intent": "chat"}
+            - "muta o <@123> aí" → {"intent": "mod"}
+
             Não explique. Não comente. APENAS o JSON: {"intent": "mod"|"kb"|"chat"}.
         """.trimIndent()
 

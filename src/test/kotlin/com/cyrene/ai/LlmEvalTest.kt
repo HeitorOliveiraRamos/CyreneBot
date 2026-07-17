@@ -51,6 +51,12 @@ class LlmEvalTest {
         "te amo, sabia?" to Intent.CHAT,
         "bom dia princesa" to Intent.CHAT,
         "me dá um conselho de vida" to Intent.CHAT,
+        // chat — banter that merely NAMES a character ("joke killed by relic stats" cases).
+        // Held-out on purpose: none of these appear as few-shots in the gate prompt.
+        "a firefly é minha esposa e ninguém tira" to Intent.CHAT,
+        "será que o Dan Heng me daria bom dia?" to Intent.CHAT,
+        "to me sentindo a Kafka hoje kkk" to Intent.CHAT,
+        "aposto que a Silver Wolf ia hackear meu banco" to Intent.CHAT,
         // kb — characters, kits, recommendations that depend on game facts
         "quem é a Acheron?" to Intent.KNOWLEDGE,
         "qual o elemento do Jing Yuan?" to Intent.KNOWLEDGE,

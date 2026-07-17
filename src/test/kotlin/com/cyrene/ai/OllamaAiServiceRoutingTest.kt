@@ -2,6 +2,8 @@ package com.cyrene.ai
 
 import com.cyrene.ai.OllamaAiService.Intent
 import com.cyrene.ai.OllamaAiService.VoicePath
+import com.cyrene.conversation.ConversationMessage
+import com.cyrene.conversation.MessageRole
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
@@ -156,11 +158,23 @@ class OllamaAiServiceRoutingTest {
     }
 
     @Test
-    fun `gazetteerFastPath routes a question-shaped character mention to KNOWLEDGE`() {
+    fun `gazetteerFastPath routes a mechanics-cue character mention to KNOWLEDGE`() {
         val knowsAcheron = { s: String -> s.contains("acheron", ignoreCase = true) }
-        assertEquals(Intent.KNOWLEDGE, OllamaAiService.gazetteerFastPath("quem é a Acheron?", knowsAcheron))
         assertEquals(Intent.KNOWLEDGE, OllamaAiService.gazetteerFastPath("me fala o kit da acheron", knowsAcheron))
+        assertEquals(Intent.KNOWLEDGE, OllamaAiService.gazetteerFastPath("build da Acheron", knowsAcheron))
         assertEquals(Intent.KNOWLEDGE, OllamaAiService.gazetteerFastPath("[Heitor]: qual o elemento da Acheron", knowsAcheron))
+    }
+
+    @Test
+    fun `gazetteerFastPath defers banter naming a character even when question-shaped`() {
+        val knowsAcheron = { s: String -> s.contains("acheron", ignoreCase = true) }
+        // A '?' or a generic question word is NOT a mechanics cue: these must reach the
+        // LLM gate (which sees context and can keep the joke in chat), never fast-path
+        // into a build dump — the "joke killed by relic stats" regression.
+        assertEquals(null, OllamaAiService.gazetteerFastPath("será que a Acheron me ama?", knowsAcheron))
+        assertEquals(null, OllamaAiService.gazetteerFastPath("a acheron é linda?", knowsAcheron))
+        assertEquals(null, OllamaAiService.gazetteerFastPath("quem é a Acheron?", knowsAcheron))
+        assertEquals(null, OllamaAiService.gazetteerFastPath("como a acheron pagaria boleto kkk?", knowsAcheron))
     }
 
     @Test
@@ -180,6 +194,38 @@ class OllamaAiServiceRoutingTest {
         assertEquals(null, OllamaAiService.gazetteerFastPath("a acheron é linda demais", knowsAcheron))
         // Question-shaped but no known character → LLM gate decides.
         assertEquals(null, OllamaAiService.gazetteerFastPath("qual seu nome?", { false }))
+    }
+
+    @Test
+    fun `gateUserBlock includes up to two prior turns as labelled context`() {
+        fun msg(role: MessageRole, content: String) = ConversationMessage(0L, role, content)
+        val history = listOf(
+            msg(MessageRole.USER, "imagina a acheron no pix"),
+            msg(MessageRole.ASSISTANT, "kkk ela ia cobrar juros"),
+            msg(MessageRole.USER, "e o welt entao?"),
+        )
+        val block = OllamaAiService.gateUserBlock(history, "e o welt entao?")
+        assertEquals(
+            """
+            Conversa anterior (apenas contexto — classifique SÓ a última mensagem):
+            Usuário: imagina a acheron no pix
+            Bot: kkk ela ia cobrar juros
+
+            Mensagem: e o welt entao?
+            Resposta:
+            """.trimIndent(),
+            block,
+        )
+    }
+
+    @Test
+    fun `gateUserBlock degrades to the bare message when there is no prior turn`() {
+        val history = listOf(ConversationMessage(0L, MessageRole.USER, "quem é a Acheron?"))
+        assertEquals(
+            "Mensagem: quem é a Acheron?\nResposta:",
+            OllamaAiService.gateUserBlock(history, "quem é a Acheron?"),
+        )
+        assertEquals("Mensagem: oi\nResposta:", OllamaAiService.gateUserBlock(emptyList(), "oi"))
     }
 
     @Test
