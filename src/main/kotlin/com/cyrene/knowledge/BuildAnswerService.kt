@@ -37,26 +37,45 @@ class BuildAnswerService(
         // A question spanning both families ("qual a build e a ult do welt?") is a
         // composition job — neither fixed template fits, so the LLM path keeps it.
         if (KitAnswerService.rawKitAsk(query) != null) return null
-        val chars = characters.findInText(query).take(MAX_CHARACTERS)
-        if (chars.isEmpty()) return null
-        val sections = chars.map { c ->
-            val doc = buildDocFor(c.id) ?: return null
+        val subjects = subjectNameGroups(query).take(MAX_CHARACTERS)
+        if (subjects.isEmpty()) return null
+        val sections = subjects.map { names ->
+            val doc = buildDocFor(names) ?: return null
             renderBuild(doc, labels, effectsFor(doc, labels)) ?: return null
         }
-        log.debug("Deterministic build answer for '{}' ({} chars, facets {})", query, chars.size, labels)
+        log.debug("Deterministic build answer for '{}' ({} chars, facets {})", query, subjects.size, labels)
         return sections.joinToString("\n\n")
     }
 
-    /** The character's build doc content, by game id. Fail-open: null falls through to retrieval. */
-    private fun buildDocFor(characterId: String): String? = try {
+    /**
+     * One name-group per asked character (its KB name-variants grouped by normalized form).
+     * The KB name-anchor tier leads because it carries variants the gazetteer can lack — e.g.
+     * "Himeko • Nova", whose game id isn't in hsr_character yet, so [HsrCharacterService.findInText]
+     * would only see base "Himeko" and answer the wrong build (live bug 2026-07-17). The
+     * gazetteer's aliases stay the fallback for other-language input the KB names don't cover.
+     */
+    private fun subjectNameGroups(query: String): List<List<String>> {
+        val kb = GameKnowledgeTools.matchNames(query, tools.kbNames())
+        if (kb.isNotEmpty()) return kb.groupBy { HsrCharacterService.normalize(it) }.values.toList()
+        return characters.findInText(query).map { it.names }
+    }
+
+    /**
+     * The build doc content for a character, fetched by any of its KB name-variants: a
+     * variant's build doc can be stored under a different separator than its kit docs
+     * ("Himeko • Nova" from nanoka vs "Himeko - Nova" from srs), so all of its names are
+     * tried. Fail-open: null falls through to retrieval.
+     */
+    private fun buildDocFor(names: List<String>): String? = try {
+        val placeholders = names.joinToString(",") { "?" }
         jdbc.queryForList(
             "SELECT content FROM vector_store " +
-                "WHERE metadata->>'category' = 'build' AND metadata->>'character_id' = ?",
+                "WHERE metadata->>'category' = 'build' AND metadata->>'name' IN ($placeholders)",
             String::class.java,
-            characterId,
+            *names.toTypedArray(),
         ).firstOrNull()
     } catch (e: Exception) {
-        log.warn("build doc fetch failed for character {}: {}", characterId, e.message)
+        log.warn("build doc fetch failed for {}: {}", names, e.message)
         null
     }
 

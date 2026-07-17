@@ -47,7 +47,20 @@ class GameKnowledgeTools(
     fun lookupHsr(
         @ToolParam(description = "A pergunta ou termo a buscar, em linguagem natural. Ex.: 'kit e relíquias da Acheron', 'elemento do Jing Yuan'.")
         query: String,
-    ): Map<String, Any?> {
+    ): Map<String, Any?> = lookupHsr(query, query)
+
+    /**
+     * [anchorQuery] drives the EXACT name-anchor and section/prune tiers; [query] drives the
+     * fuzzy semantic search. They diverge only when the caller enriched the semantic query
+     * with a character's cross-language aliases (see [KnowledgeGrounder.enrichQuery]): those
+     * aliases lift cosine recall but POISON exact anchoring, because a variant's alias always
+     * contains the BASE character's name as a whole word ("The Herta" ⊃ "Herta", "Dan Heng •
+     * Imbibitor Lunae" ⊃ "Dan Heng") — and the base name IS a stored KB name while the full
+     * variant alias is not, so anchoring on the enriched string pulls in the base character's
+     * docs too. That was the live "build da 'a herta' → answered Herta" bug. Anchoring on the
+     * raw user text keeps the variant exact; the @Tool overload passes the same string twice.
+     */
+    fun lookupHsr(query: String, anchorQuery: String): Map<String, Any?> {
         val k = properties.knowledge
 
         // Name-anchored tier: when the query literally names a KB entity (character, light
@@ -56,9 +69,9 @@ class GameKnowledgeTools(
         // matching is how "qual o passivo do cone Along the Passing Shore?" retrieves the
         // right doc even when the embedding ranks it below the threshold.
         val nameHits: List<Map<String, Any?>> = try {
-            nameAnchoredDocs(query)
+            nameAnchoredDocs(anchorQuery)
         } catch (e: Exception) {
-            log.warn("lookupHsr name-anchored search failed for '{}': {}", query, e.message)
+            log.warn("lookupHsr name-anchored search failed for '{}': {}", anchorQuery, e.message)
             emptyList()
         }
 
@@ -93,12 +106,12 @@ class GameKnowledgeTools(
             )
         }
         val cap = if (nameHits.isEmpty()) k.topK + 3 else MAX_ANCHORED + k.topK
-        val merged = mergeHits(nameHits, vectorHits, query).take(cap)
+        val merged = mergeHits(nameHits, vectorHits, anchorQuery).take(cap)
         // Build docs are trimmed to the line(s) the question names (team, relics, cone,
         // stats...) BEFORE anything downstream sees them: handed the whole doc, the voice
         // model remixed the leftovers — "equipe recomendada do welt" came back with Welt's
         // own relics dealt out across the teammates as invented per-character builds.
-        val pruned = pruneBuildLines(merged, query)
+        val pruned = pruneBuildLines(merged, anchorQuery)
         // A build doc lists relic/ornament/cone NAMES only; join in each item's own
         // relic_set/light_cone doc so the voice pass retells the real effect text
         // instead of inventing one per name. Appended after the cap: at most ~9 short

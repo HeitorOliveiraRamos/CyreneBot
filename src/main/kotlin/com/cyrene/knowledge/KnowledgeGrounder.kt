@@ -97,7 +97,10 @@ class KnowledgeGrounder(
 
     /** Local KB tier; null when it missed or the roster guard rejected the hit. */
     private fun groundLocal(query: String, retrievalQuery: String): Grounding? {
-        val local = runCatching { tools.lookupHsr(retrievalQuery) }.getOrElse {
+        // anchorQuery = the RAW user query: the exact name-anchor tier must NOT see the
+        // cross-language aliases enrichQuery appended, or a variant's alias ("The Herta")
+        // re-introduces the base name ("Herta") and anchors the wrong character's docs.
+        val local = runCatching { tools.lookupHsr(retrievalQuery, anchorQuery = query) }.getOrElse {
             log.warn("lookupHsr threw during grounding for '{}'", query, it)
             emptyMap()
         }

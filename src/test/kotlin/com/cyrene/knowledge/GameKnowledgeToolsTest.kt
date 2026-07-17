@@ -63,6 +63,24 @@ class GameKnowledgeToolsTest {
     }
 
     @Test
+    fun `a variant alias re-introduces the base name — anchor must scan the raw query, not the enriched one`() {
+        // "The Herta" is NOT a stored KB name (the KB carries the PT "A Herta"); the base
+        // "Herta" IS. enrichQuery appends the variant's other-language aliases for cosine
+        // recall, and "The Herta" contains whole-word "herta" — so anchoring on the ENRICHED
+        // string wrongly pulls in the base character. This is why lookupHsr anchors on the raw
+        // user query: the deterministic grounder passes it as anchorQuery. (live bug 2026-07-17)
+        val kb = listOf("A Herta", "Herta")
+        assertEquals(
+            listOf("A Herta"),
+            GameKnowledgeTools.matchNames("qual a build da a herta?", kb),
+        )
+        assertEquals(
+            listOf("A Herta", "Herta"),
+            GameKnowledgeTools.matchNames("qual a build da a herta? (The Herta)", kb),
+        )
+    }
+
+    @Test
     fun `matchNames skips short names, nulls and caps the result`() {
         assertTrue(GameKnowledgeTools.matchNames("yu é bom?", names).isEmpty())
         val many = (1..6).map { "Personagem Número $it" }
