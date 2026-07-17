@@ -1,6 +1,5 @@
 package com.cyrene.discord.util
 
-import com.cyrene.discord.listener.RedoButtonListener
 import net.dv8tion.jda.api.events.interaction.component.ButtonInteractionEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
 import net.dv8tion.jda.api.interactions.components.ActionRow
@@ -168,12 +167,8 @@ class PageButtonListener(private val paginator: MessagePaginator) : ListenerAdap
         }
         // Pages are re-derived per click; clamp in case a splitter tweak moved boundaries.
         val index = requested.coerceIn(0, pages.size - 1)
-        // Re-attach the 🔄 alongside ◀ ▶: a page edit replaces ALL components, so leaving it
-        // off would make Refazer vanish the moment the user turns a page.
         event.editMessage(paginator.render(pages, index))
-            .setComponents(
-                ActionRow.of(paginator.buttons(key, index, pages.size) + RedoButtonListener.redoButton()),
-            )
+            .setComponents(ActionRow.of(paginator.buttons(key, index, pages.size)))
             .queue()
     }
 }

@@ -26,6 +26,18 @@ class KitAnswerServiceTest {
         "Acheron — Eidolon 1: Verdadeiras Palavras\nCRIT +18%.",
     )
 
+    private val traces = listOf(
+        "Robin — traço maior (Bonus Ability): Cadência Coloratura\nAvança a ação em 25%.",
+    )
+
+    private val profile = listOf(
+        "Robin — personagem de Honkai: Star Rail.\nRaridade: 5 estrelas\n" +
+            "Caminho (Path): Harmonia (Harmony)\nElemento: Físico (Physical)\nDescrição: Uma cantora.",
+    )
+
+    private fun docs(skills: List<String> = emptyList(), eids: List<String> = emptyList()) =
+        mapOf("skill" to skills, "eidolon" to eids, "trace" to traces, "profile" to profile)
+
     // -------------------- wantedKit (routing) -------------------- //
 
     @Test
@@ -81,14 +93,31 @@ class KitAnswerServiceTest {
     }
 
     @Test
+    fun `trace and kit vocabulary route, with kit meaning the whole sheet`() {
+        assertEquals(
+            KitAsk(emptySet(), null, traces = true),
+            KitAnswerService.wantedKit("qual o traço do welt?"),
+        )
+        assertEquals(
+            KitAsk(emptySet(), null, traces = true),
+            KitAnswerService.wantedKit("o que faz a passiva da robin?"),
+        )
+        assertEquals(
+            KitAsk(SkillKind.entries.toSet(), emptySet(), traces = true, profile = true),
+            KitAnswerService.wantedKit("qual o kit do phainon?"),
+        )
+    }
+
+    @Test
     fun `build vocabulary excludes the kit path, and vice versa nothing routes twice`() {
         // Mixed families = composition job for the LLM path.
         assertNull(KitAnswerService.wantedKit("qual a build e a ult do welt?"))
         // Pure build questions never reach the kit path.
         assertNull(KitAnswerService.wantedKit("qual a build do phainon?"))
-        // Non-kit questions don't route.
+        // Non-kit questions don't route. An item's "passiva" carries an item cue too —
+        // that stays with the LLM path, which grounds the item's own doc.
         assertNull(KitAnswerService.wantedKit("quem é a bronya?"))
-        assertNull(KitAnswerService.wantedKit("qual o traço do welt?"))
+        assertNull(KitAnswerService.wantedKit("qual a passiva do cone along the passing shore?"))
     }
 
     // -------------------- renderKit (template) -------------------- //
@@ -97,13 +126,13 @@ class KitAnswerServiceTest {
     fun `renders the asked ability verbatim under a bold header`() {
         assertEquals(
             "**Robin — habilidade: Vox Harmonique, Opus Cosmique (Perícia Suprema)**\nEntra em Concerto.",
-            KitAnswerService.renderKit(skills, emptyList(), KitAsk(setOf(SkillKind.ULTIMATE), null)),
+            KitAnswerService.renderKit(docs(skills = skills), KitAsk(setOf(SkillKind.ULTIMATE), null)),
         )
     }
 
     @Test
     fun `whole ability set renders in canonical kit order`() {
-        val out = KitAnswerService.renderKit(skills.shuffled(), emptyList(), KitAsk(SkillKind.entries.toSet(), null))!!
+        val out = KitAnswerService.renderKit(docs(skills = skills.shuffled()), KitAsk(SkillKind.entries.toSet(), null))!!
         val order = listOf("ATQ Básico", "Perícia)", "Perícia Suprema", "Talento", "Técnica")
         val positions = order.map { out.indexOf(it) }
         assertEquals(positions.sorted(), positions)
@@ -113,9 +142,9 @@ class KitAnswerServiceTest {
     fun `eidolons filter by number and sort ascending when all are asked`() {
         assertEquals(
             "**Acheron — Eidolon 1: Verdadeiras Palavras**\nCRIT +18%.",
-            KitAnswerService.renderKit(emptyList(), eidolons, KitAsk(emptySet(), setOf(1))),
+            KitAnswerService.renderKit(docs(eids = eidolons), KitAsk(emptySet(), setOf(1))),
         )
-        val all = KitAnswerService.renderKit(emptyList(), eidolons, KitAsk(emptySet(), emptySet()))!!
+        val all = KitAnswerService.renderKit(docs(eids = eidolons), KitAsk(emptySet(), emptySet()))!!
         assertEquals(
             "**Acheron — Eidolon 1: Verdadeiras Palavras**\nCRIT +18%.\n\n" +
                 "**Acheron — Eidolon 2: Trovões Mudos**\nSPD +20%.",
@@ -124,9 +153,33 @@ class KitAnswerServiceTest {
     }
 
     @Test
+    fun `full kit renders the whole sheet in fixed order with a lore-free profile header`() {
+        val ask = KitAsk(SkillKind.entries.toSet(), emptySet(), traces = true, profile = true)
+        val out = KitAnswerService.renderKit(docs(skills = skills, eids = eidolons), ask)!!
+        val order = listOf(
+            "**Robin — personagem de Honkai: Star Rail**",
+            "Raridade: 5 estrelas",
+            "ATQ Básico", "Perícia Suprema", "Técnica",
+            "traço maior", "Eidolon 1", "Eidolon 2",
+        )
+        val positions = order.map { out.indexOf(it) }
+        assertEquals(positions.sorted(), positions, "sheet order broken in:\n$out")
+        // The profile's lore line must not leak into the kit header.
+        assertEquals(-1, out.indexOf("Uma cantora"))
+    }
+
+    @Test
+    fun `traces render for a trace ask`() {
+        assertEquals(
+            "**Robin — traço maior (Bonus Ability): Cadência Coloratura**\nAvança a ação em 25%.",
+            KitAnswerService.renderKit(docs(), KitAsk(emptySet(), null, traces = true)),
+        )
+    }
+
+    @Test
     fun `asked docs the character lacks render null so the caller falls through`() {
-        assertNull(KitAnswerService.renderKit(skills, emptyList(), KitAsk(emptySet(), setOf(3))))
-        assertNull(KitAnswerService.renderKit(emptyList(), eidolons, KitAsk(setOf(SkillKind.ULTIMATE), null)))
+        assertNull(KitAnswerService.renderKit(docs(skills = skills), KitAsk(emptySet(), setOf(3))))
+        assertNull(KitAnswerService.renderKit(docs(eids = eidolons), KitAsk(setOf(SkillKind.ULTIMATE), null)))
     }
 
     @Test

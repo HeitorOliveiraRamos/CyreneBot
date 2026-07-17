@@ -17,9 +17,9 @@ import org.springframework.stereotype.Component
  * exact type tag — exact, because "Perícia" is a prefix of "Perícia Suprema" — and the doc
  * is rendered verbatim under a bold header.
  *
- * Deliberately NOT routed here: traces/"passiva" (their docs are English — the voice pass
- * translating them is the one legit model job) and "kit" (spans traces too). Those fall
- * through, like every null from this service.
+ * Traces route here too since srs started serving them in PT (2026-07-16), and "kit"
+ * renders the whole standardized sheet: profile header (rarity/path/element), the 5
+ * abilities in canonical order, the 3 major traces, the 6 eidolons.
  */
 @Component
 class KitAnswerService(
@@ -38,11 +38,7 @@ class KitAnswerService(
         if (docs.isEmpty()) return null
         val sections = docs.groupBy { it.name }.values
             .mapNotNull { charDocs ->
-                renderKit(
-                    skillDocs = charDocs.filter { it.category == "skill" }.map { it.content },
-                    eidolonDocs = charDocs.filter { it.category == "eidolon" }.map { it.content },
-                    ask = ask,
-                )
+                renderKit(charDocs.groupBy({ it.category }, { it.content }), ask)
             }
         if (sections.isEmpty()) return null
         log.debug("Deterministic kit answer for '{}' (ask {})", query, ask)
@@ -63,12 +59,12 @@ class KitAnswerService(
 
     private data class KitDoc(val name: String, val category: String, val content: String)
 
-    /** skill + eidolon docs stored under [names]. Fail-open: empty falls through to retrieval. */
+    /** Kit docs stored under [names]. Fail-open: empty falls through to retrieval. */
     private fun kitDocs(names: List<String>): List<KitDoc> = try {
         val placeholders = names.joinToString(",") { "?" }
         jdbc.queryForList(
             "SELECT content, metadata->>'category' AS category, metadata->>'name' AS name " +
-                "FROM vector_store WHERE metadata->>'category' IN ('skill','eidolon') " +
+                "FROM vector_store WHERE metadata->>'category' IN ('profile','skill','trace','eidolon') " +
                 "AND metadata->>'name' IN ($placeholders)",
             *names.toTypedArray(),
         ).mapNotNull { row ->
@@ -92,8 +88,15 @@ class KitAnswerService(
     /**
      * What the question asks for. [eidolons] null = eidolons not asked; empty = all of
      * them ("quais os eidolons…"); otherwise the specific numbers ("e1", "eidolon 2").
+     * [traces] = the A2/A4/A6 majors; [profile] = the rarity/path/element header, only
+     * ever set by the full-"kit" ask.
      */
-    internal data class KitAsk(val kinds: Set<SkillKind>, val eidolons: Set<Int>?)
+    internal data class KitAsk(
+        val kinds: Set<SkillKind>,
+        val eidolons: Set<Int>?,
+        val traces: Boolean = false,
+        val profile: Boolean = false,
+    )
 
     internal companion object {
 
@@ -115,6 +118,18 @@ class KitAnswerService(
         private val ALL_KINDS_WORDS = setOf("habilidades", "skills")
 
         private val EIDOLON_WORDS = setOf("eidolon", "eidolons")
+
+        /** The A2/A4/A6 majors — what players call "passiva"/"traço". */
+        private val TRACE_WORDS = setOf(
+            "traco", "tracos", "trace", "traces",
+            "passiva", "passivas", "passivo", "passivos",
+        )
+
+        /** The whole sheet: profile header + abilities + traces + eidolons. */
+        private val KIT_WORDS = setOf("kit", "kits")
+
+        /** Profile lines worth showing in a kit header (the lore Descrição is noise here). */
+        private val PROFILE_LINES = listOf("Raridade", "Caminho", "Elemento")
 
         /** First-line "Eidolon N" of an eidolon doc. */
         private val EIDOLON_HEADER = Regex("Eidolon ([1-6])")
@@ -138,13 +153,21 @@ class KitAnswerService(
             if (tokens.any { it in ALL_KINDS_WORDS }) kinds += SkillKind.entries
             val nums = GameKnowledgeTools.EIDOLON_NUM.findAll(norm)
                 .map { it.groupValues[1].toInt() }.toSet()
-            val eidolons = when {
+            var eidolons = when {
                 nums.isNotEmpty() -> nums
                 tokens.any { it in EIDOLON_WORDS } -> emptySet()
                 else -> null
             }
-            if (kinds.isEmpty() && eidolons == null) return null
-            return KitAsk(kinds, eidolons)
+            var traces = tokens.any { it in TRACE_WORDS }
+            var profile = false
+            if (tokens.any { it in KIT_WORDS }) {
+                kinds += SkillKind.entries
+                traces = true
+                profile = true
+                if (eidolons == null) eidolons = emptySet()
+            }
+            if (kinds.isEmpty() && eidolons == null && !traces) return null
+            return KitAsk(kinds, eidolons, traces, profile)
         }
 
         /** [rawKitAsk] gated on the build vocabulary: a question asking for BOTH families
@@ -153,23 +176,40 @@ class KitAnswerService(
             rawKitAsk(query)?.takeIf { BuildAnswerService.wantedLabels(query).isEmpty() }
 
         /**
-         * The asked docs rendered verbatim — bold header line, description as stored —
-         * abilities in canonical kit order, then eidolons by number. Null when this
-         * character has none of the asked docs, so the caller falls through. Pure.
+         * The asked docs rendered verbatim — bold header line, description as stored — in
+         * fixed sheet order: profile header, abilities in canonical kit order, major
+         * traces, eidolons by number. Null when this character has none of the asked
+         * docs, so the caller falls through. [docsByCategory] is the character's docs
+         * keyed by vector_store category. Pure.
          */
-        internal fun renderKit(skillDocs: List<String>, eidolonDocs: List<String>, ask: KitAsk): String? {
+        internal fun renderKit(docsByCategory: Map<String, List<String>>, ask: KitAsk): String? {
+            val skillDocs = docsByCategory["skill"].orEmpty()
             val blocks = mutableListOf<String>()
+            if (ask.profile) {
+                docsByCategory["profile"].orEmpty().firstOrNull()?.let { blocks += profileHeader(it) }
+            }
             for (kind in ask.kinds.sortedBy { it.ordinal }) {
                 skillDocs.filter { typeTag(it) in kind.tags }.forEach { blocks += bolded(it) }
             }
+            if (ask.traces) {
+                docsByCategory["trace"].orEmpty().forEach { blocks += bolded(it) }
+            }
             ask.eidolons?.let { nums ->
-                eidolonDocs.mapNotNull { d -> eidolonNumber(d)?.let { n -> n to d } }
+                docsByCategory["eidolon"].orEmpty()
+                    .mapNotNull { d -> eidolonNumber(d)?.let { n -> n to d } }
                     .filter { (n, _) -> nums.isEmpty() || n in nums }
                     .sortedBy { (n, _) -> n }
                     .forEach { (_, d) -> blocks += bolded(d) }
             }
             if (blocks.isEmpty()) return null
             return blocks.joinToString("\n\n")
+        }
+
+        /** Bold title + only the rarity/path/element lines of a profile doc. */
+        private fun profileHeader(doc: String): String {
+            val lines = doc.trim().lines()
+            val facts = lines.drop(1).filter { l -> PROFILE_LINES.any(l::startsWith) }
+            return (listOf("**${lines.first().trimEnd('.', ' ')}**") + facts).joinToString("\n")
         }
 
         internal fun typeTag(doc: String): String? =

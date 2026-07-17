@@ -28,11 +28,13 @@ import java.time.Duration
  *  - **skill** — the 5 canonical abilities (Basic/Skill/Ultimate/Talent/Technique), picked as the
  *    first id of each `skillGrouping` bucket so enhanced-ultimate/technique variants don't duplicate.
  *  - **eidolon** — the 6 `ranks`, in order.
+ *  - **trace** — the 3 major traces (A2/A4/A6 Bonus Abilities), the `type == 1` nodes of
+ *    `skillTreePoints` (see [majorTraces]).
  *  - **light_cone** — every cone's superimposed passive (from `{loc}/lightcones/{id}.json`).
  *  - **relic_set** — set bonuses, cavern (2/4pc) vs planar ornament (2pc), from `{loc}/relics.json`.
  *
- * [NanokaIngestionSource] still owns **build**, **enemy** and major **trace** docs: starrailstation
- * ships an empty `relicRecommend`, no monster dataset, and only minor stat-trace nodes. The two are
+ * [NanokaIngestionSource] still owns **build** and **enemy** docs: starrailstation ships an empty
+ * `relicRecommend` and no monster dataset. The two are
  * combined in [HsrKnowledgeIngestion]; the metadata shape (`category` + `name`, plus `character_id`
  * for per-character docs) is identical so `GameKnowledgeTools.lookupHsr` treats both alike.
  *
@@ -116,6 +118,7 @@ class StarRailStationIngestionSource(
             val detail = getData(deployment, "characters/$pageId.json") ?: continue
             canonicalSkills(detail).forEach { sk -> skillDoc(name, pageId, sk)?.let { docs += it } }
             detail.path("ranks").forEachIndexed { i, rk -> eidolonDoc(name, pageId, i + 1, rk)?.let { docs += it } }
+            majorTraces(detail).forEach { pt -> traceDoc(name, pageId, pt)?.let { docs += it } }
             withKit++
         }
         log.info("SRS: {} character profiles ({} with full kits)", docs.count { it.metadata["category"] == "profile" }, withKit)
@@ -148,6 +151,16 @@ class StarRailStationIngestionSource(
         val name = rk.path("name").asText("").let(::strip)
         val desc = fill(rawDesc, paramList(rk.path("params")))
         return Document("$charName — Eidolon $n: $name\n$desc".trim(), metaOf("eidolon", charName, pageId))
+    }
+
+    /** Same text shape as [NanokaIngestionSource.traceDoc] — retrieval keys on the `trace` category. */
+    private fun traceDoc(charName: String, pageId: String, pt: JsonNode): Document? {
+        val bonus = pt.path("embedBonusSkill")
+        val rawDesc = bonus.path("descHash").asText("")
+        if (rawDesc.isBlank()) return null
+        val name = bonus.path("name").asText("").let(::strip)
+        val desc = fill(rawDesc, maxLevelParams(bonus.path("levelData")))
+        return Document("$charName — traço maior (Bonus Ability): $name\n$desc".trim(), metaOf("trace", charName, pageId))
     }
 
     // -------------------- light cones -------------------- //
@@ -283,6 +296,23 @@ class StarRailStationIngestionSource(
          * variants that share a bucket don't each become a near-duplicate doc. Falls back to
          * the raw `skills` list (deduped by name) when `skillGrouping` is absent.
          */
+        /**
+         * The 3 major traces (A2/A4/A6 Bonus Abilities): `skillTreePoints` nodes with `type` 1.
+         * On older characters two of them sit NESTED under minor stat nodes (e.g. Fu Xuan) —
+         * hence the recursive walk. Enhanced-form duplicates (`enhanceId` > 0, e.g. Seele) are
+         * dropped, mirroring how [canonicalSkills] keeps only the base kit.
+         */
+        internal fun majorTraces(detail: JsonNode): List<JsonNode> {
+            val out = mutableListOf<JsonNode>()
+            fun walk(node: JsonNode) {
+                // add(), not +=: JsonNode is Iterable<JsonNode>, so += concat-copies its children.
+                if (node.path("type").asInt() == 1 && node.path("enhanceId").asInt(0) == 0) out.add(node)
+                node.path("children").forEach { walk(it) }
+            }
+            detail.path("skillTreePoints").forEach { walk(it) }
+            return out
+        }
+
         internal fun canonicalSkills(detail: JsonNode): List<JsonNode> {
             val skills = detail.path("skills")
             val byId = skills.associateBy { it.path("id").asLong() }

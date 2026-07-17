@@ -9,6 +9,7 @@ import com.cyrene.hsr.HsrCharacterService
 import com.cyrene.knowledge.AnswerCache
 import com.cyrene.knowledge.BuildAnswerService
 import com.cyrene.knowledge.Grounding
+import com.cyrene.knowledge.ItemAnswerService
 import com.cyrene.knowledge.KitAnswerService
 import com.cyrene.knowledge.KnowledgeGrounder
 import com.cyrene.skills.SkillTools
@@ -56,6 +57,7 @@ class OllamaAiService(
     private val skillTools: SkillTools,
     private val buildAnswers: BuildAnswerService,
     private val kitAnswers: KitAnswerService,
+    private val itemAnswers: ItemAnswerService,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -116,38 +118,6 @@ class OllamaAiService(
     }
 
     /**
-     * "Refazer" path: produce a better version of the answer the bot already gave for the
-     * last user turn in [history]. Tool-less by construction — the brain pass never runs
-     * here, so a redo can never repeat a moderation action (a re-run purge would delete
-     * MORE messages). KNOWLEDGE questions re-ground from scratch with the answer cache
-     * skipped (a cache hit would return the identical text — the opposite of a redo; the
-     * improved answer then upserts over the cached one). Everything else re-rolls the
-     * conversational voice with the previous answer appended as its own turn plus an
-     * explicit "rewrite it better" user turn — ending on a user turn, not the assistant
-     * one, so the model rewrites instead of continuing the old text.
-     */
-    fun redoAnswer(
-        history: List<ConversationMessage>,
-        previousAnswer: String,
-        userName: String?,
-        progress: (String) -> Unit,
-    ): String {
-        val intent = classifyIntent(history)
-        if (intent == Intent.KNOWLEDGE) {
-            return runKnowledgePipeline(history, REDO_KNOWLEDGE_NOTE, userName, progress, skipCache = true)
-        }
-        val redoHistory = history + listOf(
-            ConversationMessage(conversationId = 0L, role = MessageRole.ASSISTANT, content = previousAnswer),
-            ConversationMessage(
-                conversationId = 0L,
-                role = MessageRole.USER,
-                content = "Refaz sua última resposta, tenta deixar ela melhor.",
-            ),
-        )
-        return runVoicePassConversational(redoHistory, REDO_CHAT_NOTE, userName).ifBlank { previousAnswer }
-    }
-
-    /**
      * Direct entry into the KNOWLEDGE pipeline for the `/hsr` slash command. Skips the
      * intent gate (a /hsr question is HSR by definition, so it can never be misrouted as
      * chat) and never touches the tool-aware brain — same guarantees as a routed
@@ -176,14 +146,14 @@ class OllamaAiService(
         extraSystemPrompt: String?,
         userName: String?,
         progress: (String) -> Unit,
-        skipCache: Boolean = false,
     ): String {
         val question = history.lastOrNull { it.role == MessageRole.USER }?.content?.trim().orEmpty()
         val searchQuery = condenseFollowUp(history, question)
 
-        // Deterministic paths: build-facet and specific-ability/eidolon questions about
-        // characters the KB has docs for are rendered by code (BuildAnswerService /
-        // KitAnswerService) — no retrieval ranking, no voice retell, no verifier, so the
+        // Deterministic paths: build-facet, specific-ability/eidolon and item-effect
+        // questions the KB has docs for are rendered by code (BuildAnswerService /
+        // KitAnswerService / ItemAnswerService) — no retrieval ranking, no voice retell,
+        // no verifier, so the
         // layout is identical every time and a fact can never migrate between items. The
         // model's only job is the one-line greeting on top ([greetingLine], user request
         // 2026-07-16 — canned fallback if it fails). Sits BEFORE the cache so stale
@@ -194,17 +164,17 @@ class OllamaAiService(
         kitAnswers.answer(searchQuery)?.let {
             return greeted(it, question, userName, "kit_render", progress)
         }
+        itemAnswers.answer(searchQuery)?.let {
+            return greeted(it, question, userName, "item_render", progress)
+        }
 
         // Answer cache: a repeat question (exact normalized match) skips retrieval, voice
         // AND verify. Only grounded/verified answers ever get stored, so a hit is as safe
-        // as the pipeline run that produced it. A redo skips the lookup (it exists to
-        // produce a DIFFERENT text) but still upserts its result below.
-        if (!skipCache) {
-            answerCache.get(searchQuery)?.let {
-                metrics.count("cyrene.knowledge", "result", "cache_hit")
-                log.debug("Knowledge cache hit for '{}'", searchQuery)
-                return it
-            }
+        // as the pipeline run that produced it.
+        answerCache.get(searchQuery)?.let {
+            metrics.count("cyrene.knowledge", "result", "cache_hit")
+            log.debug("Knowledge cache hit for '{}'", searchQuery)
+            return it
         }
 
         progress(BotMessages.STATUS_KNOWLEDGE)
@@ -1108,15 +1078,6 @@ class OllamaAiService(
             Nada mais.
         """.trimIndent()
 
-        /** System note for a knowledge redo: same grounded pipeline, just asked to try harder.
-         *  Deliberately does NOT include the previous answer — a possibly-flawed old draft
-         *  must not pollute a pipeline whose contract is "the retrieved data is ALL you know". */
-        val REDO_KNOWLEDGE_NOTE = """
-            O usuário pediu uma VERSÃO MELHOR da resposta que você já deu sobre isso.
-            Capriche nesta: mais clara, mais completa e melhor organizada. Não mencione
-            que está refazendo — apenas entregue a nova resposta.
-        """.trimIndent()
-
         /**
          * Greeting pass for code-rendered (build/kit) answers: the persona writes ONE
          * opening line announcing the delivered answer; the factual body is appended by
@@ -1152,13 +1113,6 @@ class OllamaAiService(
         internal fun sanitizeGreeting(raw: String): String? =
             raw.lineSequence().map { it.trim().trim('"', '“', '”') }.firstOrNull(String::isNotEmpty)
                 ?.takeIf { it.length <= 160 && !it.startsWith("-") && !it.startsWith("*") && !it.startsWith("#") }
-
-        /** System note for a conversational redo: rewrite the last answer, no meta commentary. */
-        val REDO_CHAT_NOTE = """
-            O usuário pediu para você REFAZER sua última resposta acima. Escreva uma versão
-            nova e melhor — não repita o texto anterior palavra por palavra e não comente
-            que está refazendo; apenas entregue a resposta nova.
-        """.trimIndent()
 
         /** Sentinel returned by the brain when the user's message needs no tool action
          *  and no Discord-state lookup — the voice pass should answer purely from persona. */

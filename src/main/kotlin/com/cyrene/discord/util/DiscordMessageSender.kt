@@ -1,7 +1,6 @@
 package com.cyrene.discord.util
 
 import com.cyrene.config.BotProperties
-import com.cyrene.discord.listener.RedoButtonListener
 import net.dv8tion.jda.api.entities.Message
 import net.dv8tion.jda.api.interactions.InteractionHook
 import net.dv8tion.jda.api.interactions.components.ActionRow
@@ -42,9 +41,7 @@ class DiscordMessageSender(
             if (pages.size > 1) {
                 val key = paginator.register(safe)
                 original.reply(paginator.render(pages, 0))
-                    .setComponents(
-                        ActionRow.of(paginator.buttons(key, 0, pages.size) + RedoButtonListener.redoButton()),
-                    )
+                    .setComponents(ActionRow.of(paginator.buttons(key, 0, pages.size)))
                     // Cache the full answer, not page 1: a user replying to this message
                     // should hand the model the whole text as context, not the visible slice.
                     .queue { sent ->
@@ -54,14 +51,7 @@ class DiscordMessageSender(
                 return
             }
         }
-        val parts = split(safe)
-        parts.forEach { part ->
-            val action = original.reply(part)
-            // Redo only fits a single-message answer: rebuilding one part of a multi-part
-            // DM reply would orphan the others.
-            if (parts.size == 1) action.setComponents(ActionRow.of(RedoButtonListener.redoButton()))
-            action.queue(botReplyCache::put)
-        }
+        split(safe).forEach { original.reply(it).queue(botReplyCache::put) }
     }
 
     /**

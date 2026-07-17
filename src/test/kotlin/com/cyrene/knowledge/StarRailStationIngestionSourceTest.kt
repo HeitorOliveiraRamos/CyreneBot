@@ -50,6 +50,27 @@ class StarRailStationIngestionSourceTest {
     }
 
     @Test
+    fun `majorTraces finds nested type-1 nodes and drops enhanced-form duplicates`() {
+        // Fu Xuan shape: 2 of the 3 majors nested under minor nodes. Seele shape: enhanceId=1 dupes.
+        val detail = mapper.readTree(
+            """
+            {"skillTreePoints":[
+               {"id":1,"type":1,"enhanceId":0,"embedBonusSkill":{"name":"A2"},"children":[
+                  {"id":2,"type":2,"children":[{"id":3,"type":1,"enhanceId":0,"embedBonusSkill":{"name":"A4"}}]},
+                  {"id":4,"type":1,"enhanceId":0,"embedBonusSkill":{"name":"A6"}}
+               ]},
+               {"id":5,"type":1,"enhanceId":1,"embedBonusSkill":{"name":"A2 enhanced"}},
+               {"id":6,"type":2,"children":[]}
+            ]}
+            """,
+        )
+        assertEquals(
+            listOf("A2", "A4", "A6"),
+            StarRailStationIngestionSource.majorTraces(detail).map { it.path("embedBonusSkill").path("name").asText() },
+        )
+    }
+
+    @Test
     fun `canonicalSkills falls back to name-deduped skills when grouping is absent`() {
         val detail = mapper.readTree(
             """{"skills":[{"id":1,"name":"A"},{"id":2,"name":"A"},{"id":3,"name":"B"}]}""",

@@ -12,9 +12,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Rebuilds the Honkai: Star Rail vector store from two structured-JSON sources:
- * [StarRailStationIngestionSource] (PT-BR profiles/skills/eidolons/light cones/relic sets) and
- * [NanokaIngestionSource] (English builds, enemies and major traces — the categories srs doesn't
- * serve). srs owns the high-value, most-queried kit docs in real Portuguese; nanoka fills the gaps.
+ * [StarRailStationIngestionSource] (PT-BR profiles/skills/eidolons/traces/light cones/relic sets)
+ * and [NanokaIngestionSource] (English builds and enemies — the categories srs doesn't serve).
+ * srs owns the high-value, most-queried kit docs in real Portuguese; nanoka fills the gaps.
  *
  * Two triggers, same [reindex] body:
  *  - startup, when `bot.knowledge.reindex=true` (`HSR_REINDEX=true mvn spring-boot:run`) —
@@ -55,7 +55,7 @@ class HsrKnowledgeIngestion(
             return
         }
         try {
-            // srs (PT) owns profile/skill/eidolon/light_cone/relic_set; nanoka fills the rest.
+            // srs (PT) owns profile/skill/eidolon/trace/light_cone/relic_set; nanoka fills the rest.
             // srs down → full English nanoka rather than lose the core kit docs. Loaded before the
             // truncate so a broken source never wipes a working KB. Nanoka's docs render names
             // through the srs PT maps (+ hsr_character for team members) so build docs list items
@@ -118,6 +118,6 @@ class HsrKnowledgeIngestion(
 
     private companion object {
         /** Categories starrailstation can't serve, so nanoka keeps them (see class kdoc). */
-        private val NANOKA_ONLY_CATEGORIES = setOf("build", "enemy", "trace")
+        private val NANOKA_ONLY_CATEGORIES = setOf("build", "enemy")
     }
 }

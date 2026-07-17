@@ -65,20 +65,12 @@ object BotMessages {
     const val STATUS_WEB = "🌐 Não tinha tudo na base, pesquisando na internet…"
     const val STATUS_MODERATION = "🛠️ Deixa comigo, já estou cuidando disso…"
     const val STATUS_WRITING = "✍️ Só um instante, organizando a resposta…"
-    const val STATUS_REDO = "🔄 Deixa eu repensar essa resposta…"
 
     /** The requester pressed Cancelar on a live status message. */
     const val CANCELLED = "Tudo bem! Cancelando..."
 
-    /** A cancel/redo button pressed by someone other than the user who asked. */
+    /** The cancel button pressed by someone other than the user who asked. */
     const val NOT_YOUR_BUTTON = "Esse botão é só pra quem me chamou 😉"
-
-    /** 🔄 pressed on an answer whose original request message is gone. */
-    const val REDO_ORIGINAL_GONE =
-        "Não achei mais a mensagem que pediu essa resposta, então não consigo refazê-la 😔"
-
-    /** 🔄 pressed again while the same answer is already being redone. */
-    const val REDO_IN_PROGRESS = "Calma! Ainda estou refazendo essa resposta 💜"
 
     /**
      * Canned openers for a code-rendered answer (build/kit paths) — the FALLBACK when the
