@@ -1,6 +1,7 @@
 package com.cyrene.knowledge
 
 import com.cyrene.config.BotProperties
+import com.cyrene.hsr.HsrCharacter
 import com.cyrene.hsr.HsrCharacterService
 import org.slf4j.LoggerFactory
 import org.springframework.ai.document.Document
@@ -32,6 +33,7 @@ class GameKnowledgeTools(
     private val webSearch: WebSearchClient,
     private val properties: BotProperties,
     private val jdbc: JdbcTemplate,
+    private val characters: HsrCharacterService,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -142,7 +144,7 @@ class GameKnowledgeTools(
      * sub-ms seq read over ~1k rows — no index or cache needed at this KB size.
      */
     private fun nameAnchoredDocs(query: String): List<Map<String, Any?>> {
-        val matched = matchNames(query, kbNames())
+        val matched = anchorNameGroups(query).flatten()
         if (matched.isEmpty()) return emptyList()
         val placeholders = matched.joinToString(",") { "?" }
         return jdbc.queryForList(
@@ -157,6 +159,16 @@ class GameKnowledgeTools(
             )
         }
     }
+
+    /**
+     * The KB metadata-name groups the [query] anchors to — one group per named entity, each the
+     * set of names its docs may be stored under. This is the single name-resolution seam every
+     * retrieval path shares (build/kit renderers, grounder name-anchor tier). See the pure
+     * [anchorNameGroups] companion for the matching contract; this wrapper supplies the live
+     * KB names and gazetteer.
+     */
+    fun anchorNameGroups(query: String): List<List<String>> =
+        anchorNameGroups(query, kbNames(), characters.all())
 
     /**
      * Every entity name carried in KB doc metadata. Sub-ms seq read over ~1k rows; fail-open
@@ -407,5 +419,40 @@ class GameKnowledgeTools(
          */
         internal fun matchNames(query: String, names: Collection<String?>): List<String> =
             HsrCharacterService.matchLongest(query, names.filterNotNull()).take(4)
+
+        /**
+         * KB metadata-name groups the [query] anchors to, one per named entity. Matches
+         * longest-name-first over BOTH the [kbNames] AND the multilingual [chars] gazetteer,
+         * then maps each match back to the names its KB docs are stored under:
+         *  - an EN/ES name resolves even though the KB stores only PT ("the herta" → A Herta's
+         *    docs), because the gazetteer bridges the language and the group carries the char's
+         *    PT name(s);
+         *  - a variant the gazetteer doesn't list yet still anchors from its own KB name
+         *    ("Himeko • Nova"), grouped by normalized form;
+         *  - the base form drops out whenever either source names the variant (longest-wins);
+         *  - a non-character entity (light cone, relic set, enemy) has no gazetteer row, so it
+         *    stands alone as its own group — same behaviour as a bare [matchNames].
+         * The EN→char link is an EXACT normalized name match, never [HsrCharacterService.resolveId]'s
+         * containment fallback, so "Himeko • Nova" cannot collapse into base "Himeko". Pure.
+         */
+        internal fun anchorNameGroups(
+            query: String,
+            kbNames: Collection<String?>,
+            chars: Collection<HsrCharacter>,
+        ): List<List<String>> {
+            val matched = matchNames(query, kbNames.filterNotNull() + chars.flatMap { it.names })
+            if (matched.isEmpty()) return emptyList()
+            val byId = chars.associateBy { it.id }
+            return matched
+                .groupBy { name -> exactCharId(name, chars) ?: HsrCharacterService.normalize(name) }
+                .map { (key, names) -> byId[key]?.names ?: names }
+        }
+
+        /** Char id whose stored name EXACTLY equals [name] (normalized), or null — no containment. */
+        private fun exactCharId(name: String, chars: Collection<HsrCharacter>): String? {
+            val q = HsrCharacterService.normalize(name)
+            if (q.isEmpty()) return null
+            return chars.firstOrNull { c -> c.names.any { HsrCharacterService.normalize(it) == q } }?.id
+        }
     }
 }

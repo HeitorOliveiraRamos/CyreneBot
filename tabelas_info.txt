@@ -1,0 +1,104 @@
+nanoka e star rail station extracted information
+
+- personagem_hsr
+id_personagem_hsr serial4
+character_id int4
+nome text
+nome_en text
+elemento text
+caminho text
+raridade int2
+faccao text
+descricao text
+atq_basico_nome text
+atq_basico_descricao text
+pericia_nome text
+pericia_descricao text
+pericia_suprema_nome text
+pericia_suprema_descricao text
+talento_nome text
+talento_descricao text
+tecnica_nome text
+tecnica_descricao text
+pericia_memoespirito_nome text
+pericia_memoespirito_descricao text
+talento_memoespirito_nome text
+talento_memoespirito_descricao text
+pericia_euforia_nome text
+pericia_euforia_descricao text
+traco_a2_nome text
+traco_a2_descricao text
+traco_a4_nome text
+traco_a4_descricao text
+traco_a6_nome text
+traco_a6_descricao text
+eidolon1_nome text
+eidolon1_descricao text
+eidolon2_nome text
+eidolon2_descricao text
+eidolon3_nome text
+eidolon3_descricao text
+eidolon4_nome text
+eidolon4_descricao text
+eidolon5_nome text
+eidolon5_descricao text
+eidolon6_nome text
+eidolon6_descricao text
+detalhes_personagem text
+historia_personagem_parte1 text
+historia_personagem_parte2 text
+historia_personagem_parte3 text
+historia_personagem_parte4 text
+data_exportado timestamp
+
+- builds
+id_build serial4
+id_personagem_hsr int4 references personagem_hsr(id_personagem_hsr)
+id_reliquia1 int4 references reliquias(id_reliquia)
+id_reliquia2 int4 references reliquias(id_reliquia)
+id_reliquia3 int4 references reliquias(id_reliquia)
+id_ornamento_plano1 int4 references ornamentos_planos(id_ornamento_plano)
+id_ornamento_plano2 int4 references ornamentos_planos(id_ornamento_plano)
+id_ornamento_plano3 int4 references ornamentos_planos(id_ornamento_plano)
+id_cone_de_luz1 int4 references cones_de_luz(id_cone_de_luz)
+id_cone_de_luz2 int4 references cones_de_luz(id_cone_de_luz)
+id_cone_de_luz3 int4 references cones_de_luz(id_cone_de_luz)
+main_stat_corpo text
+main_stat_pes text
+main_stat_esfera text
+main_stat_corda text
+substatus_recomendados text
+equipe_recomendada text
+
+- reliquias
+id_reliquia serial4
+nome text
+efeito_2_pecas text
+efeito_4_pecas text
+cabeca_nome text
+cabeca_descricao text
+maos_nome text
+maos_descricao text
+corpo_nome text
+corpo_descricao text
+pes_nome text
+pes_descricao text
+
+- ornamentos_planos
+id_ornamento_plano serial4
+nome text
+efeito_2_pecas text
+esfera_nome text
+esfera_descricao text
+corda_nome text
+corda_descricao text
+
+- cones_de_luz
+id_cone_de_luz serial4
+nome text
+caminho text
+raridade int2
+efeito_nome text
+efeito_descricao text
+descricao text
+id_personagem_hsr_atribuido int4 references personagem_hsr(id_personagem_hsr) -- (Normally, 5 star characters have a lightcone designed for them, so in case when a user asks something like "o que o cone da cyrene faz?", the bot will know which light cone the user is referring to. The normal value for this is the id_personagem_hsr from the build table which has this id_cone_de_luz as the id_cone_de_luz1)

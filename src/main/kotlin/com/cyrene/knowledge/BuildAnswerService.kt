@@ -24,7 +24,6 @@ import org.springframework.stereotype.Component
 @Component
 class BuildAnswerService(
     private val jdbc: JdbcTemplate,
-    private val characters: HsrCharacterService,
     private val tools: GameKnowledgeTools,
 ) {
 
@@ -37,7 +36,9 @@ class BuildAnswerService(
         // A question spanning both families ("qual a build e a ult do welt?") is a
         // composition job — neither fixed template fits, so the LLM path keeps it.
         if (KitAnswerService.rawKitAsk(query) != null) return null
-        val subjects = subjectNameGroups(query).take(MAX_CHARACTERS)
+        // Shared resolver: bridges EN/ES names to the KB's PT docs AND catches variants the
+        // gazetteer lacks ("Himeko • Nova") — one group per asked character.
+        val subjects = tools.anchorNameGroups(query).take(MAX_CHARACTERS)
         if (subjects.isEmpty()) return null
         val sections = subjects.map { names ->
             val doc = buildDocFor(names) ?: return null
@@ -45,19 +46,6 @@ class BuildAnswerService(
         }
         log.debug("Deterministic build answer for '{}' ({} chars, facets {})", query, subjects.size, labels)
         return sections.joinToString("\n\n")
-    }
-
-    /**
-     * One name-group per asked character (its KB name-variants grouped by normalized form).
-     * The KB name-anchor tier leads because it carries variants the gazetteer can lack — e.g.
-     * "Himeko • Nova", whose game id isn't in hsr_character yet, so [HsrCharacterService.findInText]
-     * would only see base "Himeko" and answer the wrong build (live bug 2026-07-17). The
-     * gazetteer's aliases stay the fallback for other-language input the KB names don't cover.
-     */
-    private fun subjectNameGroups(query: String): List<List<String>> {
-        val kb = GameKnowledgeTools.matchNames(query, tools.kbNames())
-        if (kb.isNotEmpty()) return kb.groupBy { HsrCharacterService.normalize(it) }.values.toList()
-        return characters.findInText(query).map { it.names }
     }
 
     /**

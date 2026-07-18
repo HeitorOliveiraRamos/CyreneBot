@@ -162,6 +162,13 @@ data class BotProperties(
     data class Knowledge(
         val reindex: Boolean = false,
         /**
+         * One-shot: when true, [com.cyrene.hsr.SrsNanokaPopulator] harvests the rich SRS+nanoka
+         * schema (V17: personagem_hsr/reliquias/ornamentos_planos/cones_de_luz) on startup and
+         * exits the runner. Off by default so normal boots are untouched; run once with
+         * `POPULATE_SRS_NANOKA=true mvn spring-boot:run`, then restart without it.
+         */
+        val populateSrsNanoka: Boolean = false,
+        /**
          * When true, the daily [com.cyrene.knowledge.KbFreshnessCheck] doesn't just WARN on
          * a version mismatch — it triggers a full reindex right there (load-then-truncate,
          * so a broken source never wipes a working KB). During the re-embed (a few minutes)

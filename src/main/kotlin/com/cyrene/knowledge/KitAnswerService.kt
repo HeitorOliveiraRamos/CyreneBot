@@ -24,7 +24,6 @@ import org.springframework.stereotype.Component
 @Component
 class KitAnswerService(
     private val jdbc: JdbcTemplate,
-    private val characters: HsrCharacterService,
     private val tools: GameKnowledgeTools,
 ) {
 
@@ -46,16 +45,13 @@ class KitAnswerService(
     }
 
     /**
-     * Names to fetch docs under. KB metadata names first ([GameKnowledgeTools.matchNames]
-     * handles accents and SP-form separators); when the user asked in another language
-     * ("march 7th"), the gazetteer's aliases are the fallback — whichever equals the
-     * stored doc name wins, the rest match nothing and cost nothing.
+     * Names to fetch docs under, from the shared resolver ([GameKnowledgeTools.anchorNameGroups]):
+     * KB names + the multilingual gazetteer, so an EN/ES name ("the herta", "march 7th") resolves
+     * to the KB's PT docs and variants the gazetteer lacks still anchor. Flattened — kitDocs
+     * fetches by exact name, so extra other-language aliases just match nothing and cost nothing.
      */
-    private fun subjectNames(query: String): List<String> {
-        val kb = GameKnowledgeTools.matchNames(query, tools.kbNames())
-        if (kb.isNotEmpty()) return kb
-        return characters.findInText(query).flatMap { it.names }.distinct()
-    }
+    private fun subjectNames(query: String): List<String> =
+        tools.anchorNameGroups(query).flatten()
 
     private data class KitDoc(val name: String, val category: String, val content: String)
 

@@ -4,20 +4,47 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 
 /**
- * One row of the `hsr_character` cache table: the same game id mihomo/StarRailRes use,
- * the localized names (null while StarRailRes hasn't shipped the character yet — fribbels
- * carries betas earlier), and the harvested fribbels build metadata (null for characters
- * StarRailRes knows but fribbels doesn't score).
+ * One row of the `hsr_character` cache table: the same numeric game id nanoka/mihomo use,
+ * both names (PT + EN), and the full extracted kit and lore. Sourced PT-first from
+ * starrailstation, falling back to nanoka's English for characters still in beta/leak that
+ * srs hasn't published — so [namePt] and every kit/lore field is nullable (a source may not
+ * carry a given piece). Trailblazer/March path-forms are distinct rows (distinct [id] +
+ * [caminho]); fribbels build metadata now lives in its own table ([FribbelsMeta]).
+ *
+ * Field names stay `nameEn`/`namePt` (mapping the `nome_en`/`nome` columns) so the name-
+ * matching callers don't churn; the new fields use the PT column names.
  */
 data class HsrCharacter(
     val id: String,
-    val nameEn: String?,
-    val namePt: String?,
-    val nameEs: String?,
-    val fribbels: FribbelsMeta?,
+    val nameEn: String? = null,
+    val namePt: String? = null,
+    val elemento: String? = null,
+    val raridade: Int? = null,
+    val caminho: String? = null,
+    val faccao: String? = null,
+    val descricao: String? = null,
+    val atqBasico: String? = null,
+    val pericia: String? = null,
+    val periciaSuprema: String? = null,
+    val talento: String? = null,
+    val tecnica: String? = null,
+    val tracoA2: String? = null,
+    val tracoA4: String? = null,
+    val tracoA6: String? = null,
+    val eidolon1: String? = null,
+    val eidolon2: String? = null,
+    val eidolon3: String? = null,
+    val eidolon4: String? = null,
+    val eidolon5: String? = null,
+    val eidolon6: String? = null,
+    val detalhesPersonagem: String? = null,
+    val historiaParte1: String? = null,
+    val historiaParte2: String? = null,
+    val historiaParte3: String? = null,
+    val historiaParte4: String? = null,
 ) {
     /** All known names, for accent-insensitive matching across the languages users mix. */
-    val names: List<String> get() = listOfNotNull(nameEn, namePt, nameEs)
+    val names: List<String> get() = listOfNotNull(nameEn, namePt)
 }
 
 /**

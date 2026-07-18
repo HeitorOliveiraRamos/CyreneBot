@@ -148,7 +148,9 @@ class OllamaAiService(
         progress: (String) -> Unit,
     ): String {
         val question = history.lastOrNull { it.role == MessageRole.USER }?.content?.trim().orEmpty()
-        val searchQuery = condenseFollowUp(history, question)
+        // Expand player shorthands ("dan heng il" → "Dan Heng - Embebidor Lunae") the KB has no
+        // name for, so every downstream matcher anchors the right variant instead of the base.
+        val searchQuery = HsrCharacterService.expandNicknames(condenseFollowUp(history, question))
 
         // Deterministic paths: build-facet, specific-ability/eidolon and item-effect
         // questions the KB has docs for are rendered by code (BuildAnswerService /

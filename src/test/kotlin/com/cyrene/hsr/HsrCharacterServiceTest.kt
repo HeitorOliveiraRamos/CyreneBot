@@ -8,22 +8,21 @@ import kotlin.test.assertTrue
 /** Locks the pure name-resolution core and the recommendation rendering. */
 class HsrCharacterServiceTest {
 
-    private fun char(id: String, en: String?, pt: String? = null, es: String? = null) =
-        HsrCharacter(id, en, pt, es, fribbels = null)
+    private fun char(id: String, en: String?, pt: String? = null) =
+        HsrCharacter(id, nameEn = en, namePt = pt)
 
     private val chars = listOf(
-        char("1308", "Acheron", "Acheron", "Acheron"),
-        char("1310", "Firefly", "Vagalume", "Luciérnaga"),
+        char("1308", "Acheron", "Acheron"),
+        char("1310", "Firefly", "Vagalume"),
         char("1212", "Jingliu", "Jingliu"),
         char("1213", "Dan Heng • Imbibitor Lunae", "Dan Heng - Lua Imbibitora"),
         char("1002", "Dan Heng", "Dan Heng"),
     )
 
     @Test
-    fun `resolve matches any language accent-insensitively`() {
+    fun `resolve matches pt or en, accent-insensitively`() {
         assertEquals("1310", HsrCharacterService.resolve("firefly", chars))
         assertEquals("1310", HsrCharacterService.resolve("VAGALUME", chars))
-        assertEquals("1310", HsrCharacterService.resolve("luciernaga", chars))
     }
 
     @Test
@@ -67,6 +66,22 @@ class HsrCharacterServiceTest {
     }
 
     @Test
+    fun `expandNicknames turns il and pt shorthands into the canonical variant name`() {
+        assertEquals(
+            "qual a build do Dan Heng - Embebidor Lunae?",
+            HsrCharacterService.expandNicknames("qual a build do dan heng il?"),
+        )
+        // Case-insensitive; the rest of the query is left verbatim.
+        assertEquals(
+            "build do Dan Heng - Permansor Terrae",
+            HsrCharacterService.expandNicknames("build do DAN HENG PT"),
+        )
+        // Base Dan Heng and unrelated "il"/"pt" tokens stay untouched.
+        assertEquals("build do dan heng", HsrCharacterService.expandNicknames("build do dan heng"))
+        assertEquals("ele fala pt br", HsrCharacterService.expandNicknames("ele fala pt br"))
+    }
+
+    @Test
     fun `resolve matches SP names typed without the stored punctuation`() {
         assertEquals("1213", HsrCharacterService.resolve("dan heng lua imbibitora", chars))
     }
@@ -81,7 +96,7 @@ class HsrCharacterServiceTest {
     @Test
     fun `charactersIn skips stoplisted and short names`() {
         val risky = listOf(
-            char("9001", "Pela", "Pela", "Pela"),
+            char("9001", "Pela", "Pela"),
             char("9002", "Sunday", "Domingo"),
         )
         // "pela" and "domingo" are everyday Portuguese words — never gazetteer hits.

@@ -25,7 +25,8 @@ import java.util.concurrent.TimeUnit
 class HsrCharacterService(
     private val jdbc: JdbcTemplate,
     private val mapper: ObjectMapper,
-    private val harvester: FribbelsHarvester,
+    private val kitHarvester: HsrCharacterHarvester,
+    private val buildMetaHarvester: FribbelsHarvester,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -33,7 +34,18 @@ class HsrCharacterService(
     @Volatile
     private var table: Map<String, HsrCharacter> = emptyMap()
 
+    /** Fribbels build metadata (id → weights/sets), split into its own `hsr_build_meta` table. */
+    @Volatile
+    private var buildMeta: Map<String, FribbelsMeta> = emptyMap()
+
     fun byId(id: String): HsrCharacter? = loaded()[id]
+
+    /**
+     * Snapshot of every loaded character. Used as the multilingual name pool for KB name-
+     * anchoring: the vector store stores PT names only, so an EN/ES query ("the herta") can't
+     * anchor against the KB alone — the gazetteer bridges it. Empty when the table isn't loaded.
+     */
+    fun all(): Collection<HsrCharacter> = loaded().values
 
     /**
      * Game id → PT display name, for callers that render character names to users
@@ -44,7 +56,10 @@ class HsrCharacterService(
         loaded().forEach { (id, c) -> c.namePt?.let { put(id, it) } }
     }
 
-    fun fribbelsMeta(id: String): FribbelsMeta? = loaded()[id]?.fribbels
+    fun fribbelsMeta(id: String): FribbelsMeta? {
+        if (table.isEmpty()) loaded() // ensures buildMeta is loaded alongside the table
+        return buildMeta[id]
+    }
 
     /**
      * Resolves a user-typed name in any of the three languages to a character id:
@@ -81,48 +96,118 @@ class HsrCharacterService(
     }
 
     private fun harvestAndStore() {
-        val chars = harvester.harvest()
-        // Sanity floor: the game has 90+ characters; fewer than 50 parsed means the source
-        // moved/broke, not that characters vanished — keep what we have.
-        if (chars.size < 50 || chars.count { it.fribbels != null } < 50) {
-            log.warn(
-                "hsr_character: colheita implausível ({} personagens, {} com metadados) — mantendo dados anteriores",
-                chars.size, chars.count { it.fribbels != null },
-            )
+        storeKit(kitHarvester.harvest())
+        storeBuildMeta(buildMetaHarvester.harvest())
+        loadFromDb()
+    }
+
+    /** Upserts the full-kit rows. Sanity floor: <50 chars = the source moved/broke, keep what we have. */
+    private fun storeKit(chars: List<HsrCharacter>) {
+        if (chars.size < 50) {
+            log.warn("hsr_character: colheita implausível ({} personagens) — mantendo dados anteriores", chars.size)
             return
         }
         chars.forEach { c ->
             jdbc.update(
                 """
-                INSERT INTO hsr_character (id, name_en, name_pt, name_es, fribbels, data_exportado)
-                VALUES (?, ?, ?, ?, ?::jsonb, now())
+                INSERT INTO hsr_character (
+                    id, nome, nome_en, elemento, raridade, caminho, faccao, descricao,
+                    atq_basico, pericia, pericia_suprema, talento, tecnica,
+                    traco_a2, traco_a4, traco_a6,
+                    eidolon1, eidolon2, eidolon3, eidolon4, eidolon5, eidolon6,
+                    detalhes_personagem, historia_personagem_parte1, historia_personagem_parte2,
+                    historia_personagem_parte3, historia_personagem_parte4, data_exportado
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
                 ON CONFLICT (id) DO UPDATE SET
-                    name_en = EXCLUDED.name_en,
-                    name_pt = EXCLUDED.name_pt,
-                    name_es = EXCLUDED.name_es,
-                    fribbels = EXCLUDED.fribbels,
+                    nome = EXCLUDED.nome, nome_en = EXCLUDED.nome_en, elemento = EXCLUDED.elemento,
+                    raridade = EXCLUDED.raridade, caminho = EXCLUDED.caminho, faccao = EXCLUDED.faccao,
+                    descricao = EXCLUDED.descricao, atq_basico = EXCLUDED.atq_basico,
+                    pericia = EXCLUDED.pericia, pericia_suprema = EXCLUDED.pericia_suprema,
+                    talento = EXCLUDED.talento, tecnica = EXCLUDED.tecnica,
+                    traco_a2 = EXCLUDED.traco_a2, traco_a4 = EXCLUDED.traco_a4, traco_a6 = EXCLUDED.traco_a6,
+                    eidolon1 = EXCLUDED.eidolon1, eidolon2 = EXCLUDED.eidolon2, eidolon3 = EXCLUDED.eidolon3,
+                    eidolon4 = EXCLUDED.eidolon4, eidolon5 = EXCLUDED.eidolon5, eidolon6 = EXCLUDED.eidolon6,
+                    detalhes_personagem = EXCLUDED.detalhes_personagem,
+                    historia_personagem_parte1 = EXCLUDED.historia_personagem_parte1,
+                    historia_personagem_parte2 = EXCLUDED.historia_personagem_parte2,
+                    historia_personagem_parte3 = EXCLUDED.historia_personagem_parte3,
+                    historia_personagem_parte4 = EXCLUDED.historia_personagem_parte4,
                     data_exportado = EXCLUDED.data_exportado
                 """.trimIndent(),
-                c.id, c.nameEn, c.namePt, c.nameEs, c.fribbels?.toJson(mapper),
+                c.id, c.namePt, c.nameEn, c.elemento, c.raridade, c.caminho, c.faccao, c.descricao,
+                c.atqBasico, c.pericia, c.periciaSuprema, c.talento, c.tecnica,
+                c.tracoA2, c.tracoA4, c.tracoA6,
+                c.eidolon1, c.eidolon2, c.eidolon3, c.eidolon4, c.eidolon5, c.eidolon6,
+                c.detalhesPersonagem, c.historiaParte1, c.historiaParte2, c.historiaParte3, c.historiaParte4,
             )
         }
-        loadFromDb()
         log.info("hsr_character: colheita ok — {} personagens salvos", chars.size)
+    }
+
+    /** Upserts the fribbels build metadata. <50 scored = a repo-side format break, keep what we have. */
+    private fun storeBuildMeta(meta: Map<String, FribbelsMeta>) {
+        if (meta.size < 50) {
+            log.warn("hsr_build_meta: colheita implausível ({} metadados) — mantendo dados anteriores", meta.size)
+            return
+        }
+        meta.forEach { (id, m) ->
+            jdbc.update(
+                """
+                INSERT INTO hsr_build_meta (id, fribbels, data_exportado) VALUES (?, ?::jsonb, now())
+                ON CONFLICT (id) DO UPDATE SET fribbels = EXCLUDED.fribbels, data_exportado = EXCLUDED.data_exportado
+                """.trimIndent(),
+                id, m.toJson(mapper),
+            )
+        }
+        log.info("hsr_build_meta: colheita ok — {} metadados salvos", meta.size)
     }
 
     @Synchronized
     private fun loadFromDb() {
         table = jdbc.query(
-            "SELECT id, name_en, name_pt, name_es, fribbels::text AS fribbels FROM hsr_character",
+            """
+            SELECT id, nome, nome_en, elemento, raridade, caminho, faccao, descricao,
+                   atq_basico, pericia, pericia_suprema, talento, tecnica,
+                   traco_a2, traco_a4, traco_a6,
+                   eidolon1, eidolon2, eidolon3, eidolon4, eidolon5, eidolon6,
+                   detalhes_personagem, historia_personagem_parte1, historia_personagem_parte2,
+                   historia_personagem_parte3, historia_personagem_parte4
+            FROM hsr_character
+            """.trimIndent(),
         ) { rs, _ ->
             HsrCharacter(
                 id = rs.getString("id"),
-                nameEn = rs.getString("name_en"),
-                namePt = rs.getString("name_pt"),
-                nameEs = rs.getString("name_es"),
-                fribbels = rs.getString("fribbels")?.let { FribbelsMeta.fromJson(mapper.readTree(it)) },
+                namePt = rs.getString("nome"),
+                nameEn = rs.getString("nome_en"),
+                elemento = rs.getString("elemento"),
+                raridade = rs.getInt("raridade").takeUnless { rs.wasNull() },
+                caminho = rs.getString("caminho"),
+                faccao = rs.getString("faccao"),
+                descricao = rs.getString("descricao"),
+                atqBasico = rs.getString("atq_basico"),
+                pericia = rs.getString("pericia"),
+                periciaSuprema = rs.getString("pericia_suprema"),
+                talento = rs.getString("talento"),
+                tecnica = rs.getString("tecnica"),
+                tracoA2 = rs.getString("traco_a2"),
+                tracoA4 = rs.getString("traco_a4"),
+                tracoA6 = rs.getString("traco_a6"),
+                eidolon1 = rs.getString("eidolon1"),
+                eidolon2 = rs.getString("eidolon2"),
+                eidolon3 = rs.getString("eidolon3"),
+                eidolon4 = rs.getString("eidolon4"),
+                eidolon5 = rs.getString("eidolon5"),
+                eidolon6 = rs.getString("eidolon6"),
+                detalhesPersonagem = rs.getString("detalhes_personagem"),
+                historiaParte1 = rs.getString("historia_personagem_parte1"),
+                historiaParte2 = rs.getString("historia_personagem_parte2"),
+                historiaParte3 = rs.getString("historia_personagem_parte3"),
+                historiaParte4 = rs.getString("historia_personagem_parte4"),
             )
         }.associateBy { it.id }
+        buildMeta = jdbc.query("SELECT id, fribbels::text AS fribbels FROM hsr_build_meta") { rs, _ ->
+            rs.getString("id") to FribbelsMeta.fromJson(mapper.readTree(rs.getString("fribbels")))
+        }.toMap()
     }
 
     /** DB-only lazy load for calls that beat the first scheduled tick; never touches the network. */
@@ -142,6 +227,31 @@ class HsrCharacterService(
 
         private val DIACRITICS = Regex("\\p{M}+")
         private val NON_ALNUM = Regex("[^\\p{L}\\p{N}]+")
+
+        /**
+         * Player shorthands that NO data source lists as a name → the canonical variant name
+         * the KB/gazetteer actually carry. "dan heng il"/"dan heng pt" are the Imbibitor Lunae
+         * / Permansor Terrae forms; left alone they whole-word-match only base "Dan Heng", so
+         * every build/kit question about them answered the base character. Extend as new
+         * shorthands surface (the English "imbibitor/permansor" full names still resolve on
+         * their own; only the initialisms need this). Case-insensitive, whole-phrase.
+         */
+        // ponytail: hand-kept alias map; grows one line per shorthand players actually type.
+        private val NICKNAMES: Map<Regex, String> = mapOf(
+            Regex("\\bdan heng il\\b", RegexOption.IGNORE_CASE) to "Dan Heng - Embebidor Lunae",
+            Regex("\\bdan heng pt\\b", RegexOption.IGNORE_CASE) to "Dan Heng - Permansor Terrae",
+        )
+
+        /**
+         * Expands the [NICKNAMES] shorthands in [query] to the canonical variant name before
+         * any name matching runs; the rest of the query is left verbatim (downstream matchers
+         * normalize anyway). Pure, so the alias set is unit-testable without a DB.
+         */
+        fun expandNicknames(query: String): String {
+            var out = query
+            for ((re, full) in NICKNAMES) out = re.replace(out, full)
+            return out
+        }
 
         /**
          * Accent/case/punctuation-insensitive form so "marco" finds "Março 7" and a user typing

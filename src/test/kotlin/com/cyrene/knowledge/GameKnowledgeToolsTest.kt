@@ -1,5 +1,6 @@
 package com.cyrene.knowledge
 
+import com.cyrene.hsr.HsrCharacter
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -59,6 +60,48 @@ class GameKnowledgeToolsTest {
         assertEquals(
             listOf("Himeko - Nova", "Himeko • Nova"),
             GameKnowledgeTools.matchNames("quem é a himeko nova?", listOf("Himeko", "Himeko - Nova", "Himeko • Nova")),
+        )
+    }
+
+    // -------------------- anchorNameGroups (shared resolver) -------------------- //
+
+    // KB stores PT names only; the gazetteer carries EN/ES + variants. Himeko Nova is
+    // deliberately KB-only (not in the gazetteer) to mirror the live data.
+    private val kbNames = listOf("Herta", "A Herta", "Himeko", "Himeko - Nova", "Himeko • Nova", "Along the Passing Shore")
+    private val gazetteer = listOf(
+        HsrCharacter("1013", nameEn = "Herta", namePt = "Herta"),
+        HsrCharacter("1401", nameEn = "The Herta", namePt = "A Herta"),
+        HsrCharacter("1003", nameEn = "Himeko", namePt = "Himeko"),
+    )
+
+    private fun groups(query: String) =
+        GameKnowledgeTools.anchorNameGroups(query, kbNames, gazetteer).map { it.toSet() }
+
+    @Test
+    fun `anchorNameGroups resolves an EN variant name to the character's PT KB docs`() {
+        // "the herta" is EN — absent from the PT-only KB — yet must anchor A Herta, not base Herta.
+        assertEquals(
+            listOf(setOf("The Herta", "A Herta")),
+            groups("qual a build da the herta"),
+        )
+    }
+
+    @Test
+    fun `anchorNameGroups anchors a gazetteer-missing variant from its own KB name`() {
+        assertEquals(
+            listOf(setOf("Himeko - Nova", "Himeko • Nova")),
+            groups("qual a build da himeko nova"),
+        )
+        // Base forms still resolve to the base character alone.
+        assertEquals(listOf(setOf("Himeko")), groups("build da himeko"))
+        assertEquals(listOf(setOf("Herta")), groups("build da herta"))
+    }
+
+    @Test
+    fun `anchorNameGroups keeps a non-character entity as its own group`() {
+        assertEquals(
+            listOf(setOf("Along the Passing Shore")),
+            groups("qual o passivo do cone along the passing shore"),
         )
     }
 

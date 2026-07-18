@@ -11,19 +11,19 @@ import java.net.http.HttpResponse
 import java.time.Duration
 
 /**
- * One-shot harvest of the `hsr_character` cache from two GitHub-hosted sources:
+ * One-shot harvest of the `hsr_build_meta` cache (game id → [FribbelsMeta]) from:
  *
- *  - StarRailRes (Mar-7th, same ids as mihomo): character names in en/pt/es and the
- *    en→pt relic-set name mapping;
  *  - fribbels/hsr-optimizer: per-character build metadata regex-parsed out of the
  *    machine-formatted TypeScript configs (`scoring().stats/parts`, `simulation()`
  *    relic/ornament sets and substat priority). Spread constants (generic alternative
  *    sets) and teammates/rotations are deliberately ignored — only the explicit,
- *    character-specific recommendation is kept.
+ *    character-specific recommendation is kept;
+ *  - StarRailRes (Mar-7th): only the en→pt relic-set name mapping, to render set names in PT.
  *
- * Called only from [HsrCharacterService]'s scheduled staleness check (~monthly), never
- * from a command path. Shared fetches throw on failure so the caller keeps the previous
- * table; a single unparsable character file is skipped with a warning.
+ * Names and full kit text now come from [HsrCharacterHarvester]; this source is purely the
+ * `/build` scoring fallback. Called only from [HsrCharacterService]'s scheduled staleness
+ * check (~monthly). Shared fetches throw on failure so the caller keeps the previous rows;
+ * a single unparsable character file is skipped with a warning.
  */
 @Component
 class FribbelsHarvester(
@@ -42,11 +42,10 @@ class FribbelsHarvester(
         .version(HttpClient.Version.HTTP_1_1)
         .build()
 
-    fun harvest(): List<HsrCharacter> {
+    /** Game id → fribbels build metadata. Empty ids (the `*B1.ts` reruns with no numeric config
+     *  id) and unparsable configs are skipped; names/kit now come from [HsrCharacterHarvester]. */
+    fun harvest(): Map<String, FribbelsMeta> {
         val srr = properties.knowledge.starRailResBase
-        val namesEn = names(srr, "en", "Trailblazer")
-        val namesPt = names(srr, "pt", "Desbravador")
-        val namesEs = names(srr, "es", "Trazacaminos")
         val setPtByEn = relicSetPtByEnName(srr)
 
         val raw = properties.knowledge.fribbelsRawBase
@@ -54,7 +53,7 @@ class FribbelsHarvester(
         val paths = characterPaths(fetch(properties.knowledge.fribbelsTreeUrl))
         log.info("fribbels: harvesting {} character configs", paths.size)
 
-        val parsedById = paths.mapNotNull { path ->
+        return paths.mapNotNull { path ->
             try {
                 parseCharacter(fetch(raw + path))
                     // Expected for the *B1.ts enhanced-rerun variants (id '1005b1'): mihomo
@@ -64,29 +63,7 @@ class FribbelsHarvester(
                 log.warn("fribbels: failed to fetch/parse {} — skipped: {}", path, e.message)
                 null
             }
-        }.associateBy { it.id }
-
-        return (namesEn.keys + parsedById.keys).map { id ->
-            HsrCharacter(
-                id = id,
-                nameEn = namesEn[id],
-                namePt = namesPt[id],
-                nameEs = namesEs[id],
-                fribbels = parsedById[id]?.toMeta(setsEnum, setPtByEn),
-            )
-        }
-    }
-
-    private fun names(base: String, lang: String, trailblazer: String): Map<String, String> {
-        // fetch() stays outside buildMap: inside it, the MutableMap receiver's get/put
-        // members shadow same-named outer functions (Map.get(url) == silent null).
-        val json = mapper.readTree(fetch("$base$lang/characters.json"))
-        return buildMap {
-            json.fields().forEach { (id, node) ->
-                val name = node.path("name").asText("")
-                if (name.isNotBlank()) put(id, name.replace("{NICKNAME}", trailblazer))
-            }
-        }
+        }.associate { it.id to it.toMeta(setsEnum, setPtByEn) }
     }
 
     private fun relicSetPtByEnName(base: String): Map<String, String> {
