@@ -25,15 +25,15 @@ object BotMessages {
 
     /** A ◀ ▶ page button clicked after its row was swept (30d retention) or the DB is down. */
     const val PAGES_EXPIRED =
-        "Essa resposta já é antiga e eu perdi as outras páginas dela 😔 Me pergunta de novo que eu refaço!"
+        "Essa resposta é tão antiga quanto um livro velho! Até perdi as páginas... mas me pergunta de novo que eu lembro!"
 
     /** A slash command was used in a guild channel outside the configured allow-list. */
     const val CHANNEL_NOT_ALLOWED =
-        "Eu não estou ativa neste canal 😅 Me chama num dos canais liberados pra mim!"
+        "Me proibiram de falar aqui! Me chama num dos canais liberados para mim!"
 
     /** A moderation command needs a server; it was run in a DM. */
     const val GUILD_ONLY =
-        "Esse comando só funciona dentro de um servidor 💜"
+        "Esse comando só funciona dentro de um servidor viu!"
 
     /**
      * Someone asked for a moderation action in conversation. The bot has no such ability
@@ -41,12 +41,12 @@ object BotMessages {
      * letting the persona improvise a refusal (or, worse, claim it did the thing).
      */
     fun useCommand(command: String): String =
-        "Isso eu não faço no papo, amor — é `/$command` que resolve 😌\n" +
+        "Isso eu não faço no papo, amor — é `/$command` que resolve!\n" +
             "-# Tudo que mexe no servidor virou comando. Digita `/` que eles aparecem."
 
     /** A reply pipeline failed unexpectedly. */
     const val ERROR =
-        "Ai, me embolei toda aqui e não consegui responder agora 😔 Tenta de novo daqui a pouco?"
+        "Ai, me embolei toda aqui e não consegui responder agora... Pode tentar de novo daqui a pouco?"
 
     /** `/build` without a linked UID. */
     const val BUILD_NO_UID =
@@ -65,13 +65,13 @@ object BotMessages {
         } else {
             "Na sua vitrine eu enxergo: ${list.joinToString(", ")}. Coloca a personagem na vitrine do jogo pra eu poder avaliar."
         }
-        return "Não encontrei **$query** na sua vitrine 😔 $suffix"
+        return "Não encontrei **$query** na sua vitrine! $suffix"
     }
 
     /** `/build` for a character the community weight table doesn't cover yet. */
     fun buildNoWeights(name: String): String =
         "A **$name** é nova demais — a régua da comunidade ainda não tem pesos pra ela, e eu me " +
-            "recuso a chutar nota 😌 Tenta de novo depois da próxima atualização da tabela."
+            "recuso a chutar notas! Tenta de novo depois da próxima atualização da tabela."
 
     /**
      * Live pipeline status lines. Shown while a reply is being produced — the listener posts
@@ -80,13 +80,13 @@ object BotMessages {
      */
     const val STATUS_KNOWLEDGE = "🔎 Deixa eu procurar na minha base de conhecimento…"
     const val STATUS_WEB = "🌐 Não tinha tudo na base, pesquisando na internet…"
-    const val STATUS_WRITING = "✍️ Só um instante, organizando a resposta…"
+    const val STATUS_WRITING = "Só um minutinho, organizando a resposta…"
 
     /** The requester pressed Cancelar on a live status message. */
     const val CANCELLED = "Tudo bem! Cancelando..."
 
     /** The cancel button pressed by someone other than the user who asked. */
-    const val NOT_YOUR_BUTTON = "Esse botão é só pra quem me chamou 😉"
+    const val NOT_YOUR_BUTTON = "Seu bobo! Esse botão só funciona para quem me chamou!"
 
     /**
      * Canned openers for a code-rendered answer (build/kit paths) — the FALLBACK when the
@@ -111,7 +111,7 @@ object BotMessages {
      */
     fun knowledgeMiss(name: String?): String {
         val who = name?.trim()?.takeIf { it.isNotEmpty() }?.let { ", $it" } ?: ""
-        return "Hmm, não achei nada confiável sobre isso na minha base nem na web$who 😔 " +
-            "Pode ser que esse nome não exista ou esteja escrito diferente — me dá mais um detalhe?"
+        return "Hmm, não achei nada confiável sobre isso na minha base nem na web$who, acredita? " +
+            "Pode ser que esse nome não exista ou esteja escrito diferente, me dá mais alguns detalhes?"
     }
 }
