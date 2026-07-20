@@ -129,6 +129,32 @@ class SrsNanokaHarvesterTest {
         assertEquals(cone.coneGameId, topCone)
     }
 
+    // -------------------- recommended builds -------------------- //
+
+    @Test
+    fun `build extracts recommended relics, ornaments, cones, main stats, substats and team`() {
+        val names = mapOf("1402" to "Aglaea", "1415" to "Trailblazer", "1313" to "Sunday", "1409" to "Hyacine")
+        val b = SrsNanokaHarvester.buildBuild("1402", load("nanoka_detail_1402.json"), names)!!
+        assertEquals("1402", b.characterGameId)
+        // Shared game ids kept raw, best-first, capped to 3.
+        assertEquals(listOf("123", "102", "109"), b.reliquiaGameIds)
+        assertEquals(listOf("318", "302", "301"), b.ornamentoGameIds)
+        assertEquals(listOf("23036", "21051", "21052"), b.coneGameIds)
+        // property_list slots -> PT stat labels.
+        assertEquals("Chance Crít.", b.mainStatCorpo)     // BODY / CriticalChanceBase
+        assertEquals("Velocidade", b.mainStatPes)          // FOOT / SpeedDelta
+        assertEquals("Dano de Raio", b.mainStatEsfera)     // NECK / ThunderAddedRatio
+        assertEquals("Regen. de Energia", b.mainStatCorda) // OBJECT / SPRatioBase
+        assertTrue(b.substatusRecomendados!!.startsWith("Chance Crít. > Dano Crít."), "subs: ${b.substatusRecomendados}")
+        // Team resolved to display names, the character itself first.
+        assertEquals("Aglaea, Trailblazer, Sunday, Hyacine", b.equipeRecomendada)
+    }
+
+    @Test
+    fun `build is null when there are no recommended relics or cones`() {
+        assertNull(SrsNanokaHarvester.buildBuild("9999", mapper.createObjectNode(), emptyMap()))
+    }
+
     // -------------------- enhanced states + level caps -------------------- //
 
     @Test

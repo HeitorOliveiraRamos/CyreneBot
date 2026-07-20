@@ -16,6 +16,12 @@ data class Grounding(
     val found: Boolean,
     val context: String,
     val source: Source,
+    /**
+     * The user asked for the SHORT version, so the voice pass must condense [context] instead of
+     * retelling all of it. Only the lore tier sets this — every other tier already hands over a
+     * context scoped to the question, where "repasse tudo" is the correct instruction.
+     */
+    val summarize: Boolean = false,
 ) {
     enum class Source { LOCAL, WEB, NONE }
 
@@ -45,6 +51,7 @@ data class Grounding(
 class KnowledgeGrounder(
     private val tools: GameKnowledgeTools,
     private val characters: HsrCharacterService,
+    private val lore: LoreAnswerService,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -88,11 +95,35 @@ class KnowledgeGrounder(
             log.debug("Web-first grounding for '{}' (news/explicit-search cue)", query)
             groundWeb(query, newsQuery(query, characters.findInText(query).mapNotNull { it.nameEn }), recent = true, onWebSearch)?.let { return it }
         }
+        // Lore tier: a summary-shaped lore ask ("me da um resumo da lore do welt", "quem é a
+        // acheron?") is grounded on the narrative columns and condensed by the voice pass. It
+        // sits above the vector tier because those columns aren't embedded — the profile doc only
+        // carries the one-line `descricao`, so retrieval simply cannot reach this text. The FULL
+        // history ask never gets here: LoreAnswerService.answer renders it before the grounder runs.
+        groundLore(query)?.let { return it }
         groundLocal(query, retrievalQuery)?.let { return it }
         if (!webFirst) {
             groundWeb(query, retrievalQuery, recent = false, onWebSearch)?.let { return it }
         }
         return Grounding.EMPTY
+    }
+
+    /**
+     * Lore tier; null when the question isn't a summary-shaped lore ask or no named character has
+     * lore. The roster guard still runs: the text is real by construction (it came from a row the
+     * gazetteer resolved), but the guard also catches a MULTI-name question where only one of the
+     * names resolved, which would otherwise ground half the answer.
+     */
+    private fun groundLore(query: String): Grounding? {
+        val ctx = runCatching { lore.context(query) }.getOrElse {
+            log.warn("lore grounding threw for '{}'", query, it)
+            null
+        } ?: return null
+        if (!passesRosterGuard(query, ctx)) {
+            log.debug("Roster guard rejected lore hit for '{}'", query)
+            return null
+        }
+        return Grounding(true, ctx, Grounding.Source.LOCAL, summarize = true)
     }
 
     /** Local KB tier; null when it missed or the roster guard rejected the hit. */

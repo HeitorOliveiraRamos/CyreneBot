@@ -1,18 +1,14 @@
 package com.cyrene.knowledge
 
-import com.cyrene.config.BotProperties
 import com.fasterxml.jackson.databind.ObjectMapper
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
-import kotlin.test.assertNull
-import kotlin.test.assertTrue
 
 /**
  * Pins the placeholder/param substitution that turns nanoka's `#N[fmt]%` ability text into
- * the real numbers the model reads. This is the only non-trivial logic in the nanoka path,
- * so the formatting contracts (percent ×100, integer vs decimal, tag stripping, max-level
- * param selection) live here.
+ * the real numbers the harvester reads. This is the only non-trivial logic reused from the
+ * nanoka path, so the formatting contracts (percent ×100, integer vs decimal, tag stripping,
+ * max-level param selection) live here.
  */
 class NanokaIngestionSourceTest {
 
@@ -67,66 +63,5 @@ class NanokaIngestionSourceTest {
     @Test
     fun `strip removes braces tokens and collapses whitespace`() {
         assertEquals("hello world", NanokaIngestionSource.strip("hello   {NICKNAME}world"))
-    }
-
-    // -------------------- buildDoc -------------------- //
-
-    private val source = NanokaIngestionSource(BotProperties(token = "t", modelName = "m"), mapper)
-
-    @Test
-    fun `buildDoc resolves id lists to names, labels stats in PT and links the character id`() {
-        val detail = mapper.readTree(
-            """
-            {"relics": {
-               "set4_id_list": [117, 999],
-               "set2_id_list": [314],
-               "property_list": [
-                 {"relic_type": "BODY", "property_type": "CriticalChanceBase"},
-                 {"relic_type": "NECK", "property_type": "ThunderAddedRatio"},
-                 {"relic_type": "HEAD", "property_type": "HPDelta"}
-               ],
-               "sub_affix_property_list": ["CriticalChanceBase", "AttackAddedRatio"]
-             },
-             "lightcones": [23024],
-             "teams": [{"member_list": [1218]}]}
-            """,
-        )
-        val doc = source.buildDoc(
-            "Acheron", "1308", detail,
-            relicNames = mapOf("117" to "Pioneer Diver of Dead Waters", "314" to "Izumo Gensei"),
-            coneNames = mapOf("23024" to "Along the Passing Shore"),
-            charNames = mapOf("1218" to "Jiaoqiu"),
-        )!!
-        val text = doc.text.orEmpty()
-        assertTrue("Pioneer Diver of Dead Waters" in text)
-        assertTrue("Cone de Luz (melhor primeiro): Along the Passing Shore" in text)
-        assertTrue("Esfera Planar: Dano de Raio" in text)
-        assertTrue("Substats (prioridade): Chance Crít. > ATQ%" in text)
-        assertTrue("Equipe recomendada: Acheron, Jiaoqiu" in text)
-        // Unresolvable id dropped, not rendered raw; fixed-main HEAD slot skipped.
-        assertFalse("999" in text)
-        assertFalse("HEAD" in text)
-        assertEquals("build", doc.metadata["category"])
-        assertEquals("1308", doc.metadata["character_id"])
-    }
-
-    @Test
-    fun `buildDoc is null when there is nothing to recommend`() {
-        val detail = mapper.readTree("""{"relics": {"set4_id_list": [999]}, "lightcones": []}""")
-        assertNull(source.buildDoc("X", "1", detail, emptyMap(), emptyMap(), emptyMap()))
-    }
-
-    @Test
-    fun `load-style PT overlay renders PT item names with EN fallback per id`() {
-        // Same merge load() does: enNames + ptMap — PT wins where known, EN survives where not.
-        val en = mapOf("117" to "Pioneer Diver of Dead Waters", "328" to "Unreleased Set")
-        val pt = mapOf("117" to "Mergulhadora Pioneira de Águas Mortas")
-        val detail = mapper.readTree(
-            """{"relics": {"set4_id_list": [117, 328]}, "lightcones": []}""",
-        )
-        val text = source.buildDoc("Anaxa", "1405", detail, en + pt, emptyMap(), emptyMap())!!.text.orEmpty()
-        assertTrue("Mergulhadora Pioneira de Águas Mortas" in text)
-        assertFalse("Pioneer Diver" in text)
-        assertTrue("Unreleased Set" in text)
     }
 }

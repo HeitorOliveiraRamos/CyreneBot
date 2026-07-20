@@ -13,19 +13,18 @@ import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Component
 
 /**
- * Tools the LLM can invoke to ground its answers about Honkai: Star Rail in real data
- * instead of hallucinating character names, stats, or mechanics.
+ * Retrieval over the Honkai: Star Rail knowledge base, so answers are grounded in real data
+ * instead of hallucinated character names, stats, or mechanics.
  *
- * Two-tier strategy, mirroring the safety-first philosophy of
- * [com.cyrene.discord.tools.DiscordTools]:
+ * Two-tier strategy:
  *  1. [lookupHsr] — searches the local vector store (Kaggle datasets + scraped wiki,
  *     ingested by [HsrKnowledgeIngestion]). Fast, offline, authoritative for static data.
  *  2. [searchWeb] — online fallback via [WebSearchClient], used ONLY when the local base
  *     has nothing relevant (new patch, just-released unit, live event).
  *
- * Both return plain `Map`s; Spring AI serializes them to JSON for the model. Neither tool
- * mutates anything, so unlike the moderation tools there are no authority checks — the
- * worst case is an irrelevant snippet, which the brain pass is told to ignore.
+ * Both return plain `Map`s. Despite the `@Tool` annotations these are no longer exposed to
+ * the model as callable tools — [KnowledgeGrounder] invokes them directly, in a fixed order,
+ * so retrieval is the code's decision and not the model's. Neither mutates anything.
  */
 @Component
 class GameKnowledgeTools(

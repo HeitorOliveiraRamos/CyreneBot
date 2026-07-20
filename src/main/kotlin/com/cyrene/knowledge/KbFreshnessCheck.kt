@@ -1,6 +1,7 @@
 package com.cyrene.knowledge
 
 import com.cyrene.config.BotProperties
+import com.cyrene.hsr.SrsNanokaPopulator
 import org.slf4j.LoggerFactory
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.scheduling.annotation.Scheduled
@@ -12,16 +13,23 @@ import java.util.concurrent.TimeUnit
  * store was last indexed with (`kb_meta.hsr_versao_indexada`, written by
  * [HsrKnowledgeIngestion]) against the version nanoka currently serves.
  *
- * When they diverge and `bot.knowledge.auto-reindex` is on (the default), it triggers the
- * rebuild right here — synchronously on the scheduler thread, which also blocks the other
- * @Scheduled ticks for the few minutes the embed takes (fine at a ~6-weekly patch cadence).
- * With auto-reindex off it only WARNs, and the rebuild stays a manual `HSR_REINDEX=true` run.
+ * When they diverge and `bot.knowledge.auto-reindex` is on (the default), it runs the FULL
+ * refresh right here, in order: re-harvest the V17 tables ([SrsNanokaPopulator], the single
+ * upstream fetch) and then re-render + re-embed the vector store from them
+ * ([HsrKnowledgeIngestion]). Synchronously on the scheduler thread, which also blocks the other
+ * @Scheduled ticks for the few minutes it takes (fine at a ~6-weekly patch cadence). With
+ * auto-reindex off it only WARNs, and the refresh stays the manual `POPULATE_SRS_NANOKA=true`
+ * + `HSR_REINDEX=true` runs.
+ *
+ * This is also the cold-start bootstrap: on a fresh DB nothing has been indexed, so the first
+ * check (5 min after startup) harvests the tables and builds the store from scratch.
  */
 @Component
 class KbFreshnessCheck(
     private val nanoka: NanokaIngestionSource,
     private val jdbcTemplate: JdbcTemplate,
     private val ingestion: HsrKnowledgeIngestion,
+    private val populator: SrsNanokaPopulator,
     private val properties: BotProperties,
 ) {
 
@@ -47,19 +55,22 @@ class KbFreshnessCheck(
         }
     }
 
-    /** Reindex in place when auto-reindex is on; otherwise the old warn-only behaviour. */
+    /** Re-harvest then reindex when auto-reindex is on; otherwise the old warn-only behaviour. */
     private fun staleAction(reason: String) {
         if (!properties.knowledge.autoReindex) {
-            log.warn("{} Rode com HSR_REINDEX=true para atualizar.", reason)
+            log.warn("{} Rode com POPULATE_SRS_NANOKA=true e depois HSR_REINDEX=true para atualizar.", reason)
             return
         }
-        log.warn("{} Reindexando automaticamente (HSR_AUTO_REINDEX=false desativa)...", reason)
+        log.warn("{} Recolhendo e reindexando automaticamente (HSR_AUTO_REINDEX=false desativa)...", reason)
         try {
+            // Order matters: the store is rendered FROM the tables, so they refresh first.
+            // Keep-last-good on both sides — populate() aborts below its sanity floor (keeping the
+            // previous rows) and reindex() loads before it truncates, so a failure at either step
+            // leaves a working KB and the next daily tick retries.
+            populator.populate()
             ingestion.reindex()
         } catch (e: Exception) {
-            // Keep-last-good: the load-before-truncate order inside reindex() means a failure
-            // here leaves whatever KB existed; next daily tick retries.
-            log.error("Reindex automático falhou — mantendo a base atual e tentando no próximo ciclo.", e)
+            log.error("Refresh automático falhou — mantendo a base atual e tentando no próximo ciclo.", e)
         }
     }
 }

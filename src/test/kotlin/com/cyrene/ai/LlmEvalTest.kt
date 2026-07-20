@@ -68,18 +68,20 @@ class LlmEvalTest {
         "me fala o kit completo da Lingsha" to Intent.KNOWLEDGE,
         "quando saiu a versão 3.0?" to Intent.KNOWLEDGE,
         "esse set é melhor em quais personagens?" to Intent.KNOWLEDGE,
-        // mod — moderation actions and Discord-state queries
-        "muta o <@123> por 10 minutos por spam" to Intent.MODERATION,
-        "bane o <@456> por toxicidade" to Intent.MODERATION,
-        "expulsa o <@789> do servidor" to Intent.MODERATION,
-        "limpa 50 mensagens do canal" to Intent.MODERATION,
-        "ativa modo lento de 30 segundos" to Intent.MODERATION,
-        "dá o cargo Membro pro <@111>" to Intent.MODERATION,
-        "tira o cargo Mutado do <@222>" to Intent.MODERATION,
-        "quantos membros tem o servidor?" to Intent.MODERATION,
-        "desmuta o <@333>" to Intent.MODERATION,
-        // tricky — greeting glued to a real request
-        "oi, tudo bem? muta o <@123> por favor" to Intent.MODERATION,
+        // Moderation asks: the bot has no such action anymore (slash commands only), so these
+        // are CHAT — the persona answers by pointing at the command. What this really guards
+        // is that a server-flavoured request never gets misrouted into the KB pipeline and
+        // answered with game data.
+        "muta o <@123> por 10 minutos por spam" to Intent.CHAT,
+        "bane o <@456> por toxicidade" to Intent.CHAT,
+        "expulsa o <@789> do servidor" to Intent.CHAT,
+        "limpa 50 mensagens do canal" to Intent.CHAT,
+        "dá o cargo Membro pro <@111>" to Intent.CHAT,
+        "tira o cargo Mutado do <@222>" to Intent.CHAT,
+        "quantos membros tem o servidor?" to Intent.CHAT,
+        "cria um canal chamado geral" to Intent.CHAT,
+        // tricky — greeting glued to a server request
+        "oi, tudo bem? muta o <@123> por favor" to Intent.CHAT,
     )
 
     @Test

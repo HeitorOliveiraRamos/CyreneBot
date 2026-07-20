@@ -1,100 +1,93 @@
 package com.cyrene.knowledge
 
 import com.cyrene.hsr.HsrCharacterService
+import com.cyrene.hsr.HsrRepository
+import com.cyrene.hsr.NamedText
+import com.cyrene.hsr.PersonagemHsr
 import org.slf4j.LoggerFactory
-import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Component
 
 /**
  * Deterministic, LLM-free answers for kit questions about a specific ability or eidolon —
  * "o que a ult da robin faz?", "o que a e1 da acheron faz?", "qual o talento do welt?".
  *
- * Same contract as [BuildAnswerService]: the srs kit docs are already one self-contained
- * PT-BR doc per ability/eidolon with a typed header ("Robin — habilidade: … (Perícia
- * Suprema)"), so composing the answer is selection + formatting, not generation. The doc
- * is fetched by exact metadata name (srs uses slug character_ids, so the game-id join the
- * build path uses doesn't apply here), the asked kind is matched against the header's
- * exact type tag — exact, because "Perícia" is a prefix of "Perícia Suprema" — and the doc
- * is rendered verbatim under a bold header.
+ * Seam 2: the answer is read straight from the structured `personagem_hsr` row ([HsrRepository]),
+ * not by parsing vector-store docs. The query routing ([wantedKit]) is unchanged player-vocabulary
+ * parsing; only the source and render moved to columns — every ability/eidolon/trace is already a
+ * `_nome`/`_descricao` pair, so composing the answer is selection + formatting, not generation.
  *
- * Traces route here too since srs started serving them in PT (2026-07-16), and "kit"
- * renders the whole standardized sheet: profile header (rarity/path/element), the 5
- * abilities in canonical order, the 3 major traces, the 6 eidolons.
+ * The character is resolved through the multilingual gazetteer ([HsrCharacterService.findInText]),
+ * which (post-cutover) is `personagem_hsr` itself — so an EN/ES name resolves to the same row we
+ * render. "kit" renders the whole standardized sheet: profile header, the 5 abilities in canonical
+ * order, memoespírito/euforia when the unit has them, the 3 major traces, the 6 eidolons.
  */
 @Component
 class KitAnswerService(
-    private val jdbc: JdbcTemplate,
-    private val tools: GameKnowledgeTools,
+    private val repo: HsrRepository,
+    private val characters: HsrCharacterService,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
 
     fun answer(query: String): String? {
         val ask = wantedKit(query) ?: return null
-        val names = subjectNames(query)
-        if (names.isEmpty()) return null
-        val docs = kitDocs(names)
-        if (docs.isEmpty()) return null
-        val sections = docs.groupBy { it.name }.values
-            .mapNotNull { charDocs ->
-                renderKit(charDocs.groupBy({ it.category }, { it.content }), ask)
-            }
+        val ids = characters.findInText(query).map { it.id }.take(MAX_CHARACTERS)
+        if (ids.isEmpty()) return null
+        val sections = repo.personagens(ids)
+            .mapNotNull { renderKit(it, ask, characters.displayName(it.characterId)) }
         if (sections.isEmpty()) return null
         log.debug("Deterministic kit answer for '{}' (ask {})", query, ask)
         return sections.joinToString("\n\n")
     }
 
     /**
-     * Names to fetch docs under, from the shared resolver ([GameKnowledgeTools.anchorNameGroups]):
-     * KB names + the multilingual gazetteer, so an EN/ES name ("the herta", "march 7th") resolves
-     * to the KB's PT docs and variants the gazetteer lacks still anchor. Flattened — kitDocs
-     * fetches by exact name, so extra other-language aliases just match nothing and cost nothing.
+     * Ability slots in canonical kit order; [tag] is the PT header label. The last three exist
+     * only on some units — memoespírito on the 8 Recordação characters, euforia on the 7 Euforia
+     * ones — and render as nothing for everyone else, so they can sit in the "whole kit" set
+     * without special-casing.
      */
-    private fun subjectNames(query: String): List<String> =
-        tools.anchorNameGroups(query).flatten()
-
-    private data class KitDoc(val name: String, val category: String, val content: String)
-
-    /** Kit docs stored under [names]. Fail-open: empty falls through to retrieval. */
-    private fun kitDocs(names: List<String>): List<KitDoc> = try {
-        val placeholders = names.joinToString(",") { "?" }
-        jdbc.queryForList(
-            "SELECT content, metadata->>'category' AS category, metadata->>'name' AS name " +
-                "FROM vector_store WHERE metadata->>'category' IN ('profile','skill','trace','eidolon') " +
-                "AND metadata->>'name' IN ($placeholders)",
-            *names.toTypedArray(),
-        ).mapNotNull { row ->
-            val content = row["content"] as? String ?: return@mapNotNull null
-            KitDoc(row["name"] as? String ?: "", row["category"] as? String ?: "", content)
-        }
-    } catch (e: Exception) {
-        log.warn("kit doc fetch failed for {}: {}", names, e.message)
-        emptyList()
-    }
-
-    /** Ability slots in canonical kit order; [tags] are the exact header type tags (PT + EN). */
-    internal enum class SkillKind(vararg val tags: String) {
-        BASIC("ATQ Básico", "Basic ATK"),
-        SKILL("Perícia", "Skill"),
-        ULTIMATE("Perícia Suprema", "Ultimate"),
-        TALENT("Talento", "Talent"),
-        TECHNIQUE("Técnica", "Technique"),
+    internal enum class SkillKind(val tag: String) {
+        BASIC("ATQ Básico"),
+        SKILL("Perícia"),
+        ULTIMATE("Perícia Suprema"),
+        TALENT("Talento"),
+        TECHNIQUE("Técnica"),
+        MEMO_SKILL("Perícia do Memoespírito"),
+        MEMO_TALENT("Talento do Memoespírito"),
+        EUPHORIA("Perícia da Euforia"),
     }
 
     /**
      * What the question asks for. [eidolons] null = eidolons not asked; empty = all of
      * them ("quais os eidolons…"); otherwise the specific numbers ("e1", "eidolon 2").
-     * [traces] = the A2/A4/A6 majors; [profile] = the rarity/path/element header, only
-     * ever set by the full-"kit" ask.
+     * [traces] = the A2/A4/A6 majors; [profile] = the rarity/path/element header (+ memoespírito/
+     * euforia), only ever set by the full-"kit" ask.
      */
     internal data class KitAsk(
         val kinds: Set<SkillKind>,
         val eidolons: Set<Int>?,
         val traces: Boolean = false,
         val profile: Boolean = false,
+        val fields: Set<CharField> = emptySet(),
     )
 
+    /**
+     * A single scalar column of `personagem_hsr` the user can ask for by name ("me fala a
+     * descrição da himeko", "qual a facção do welt?"). Distinct from [KitAsk.profile], which
+     * renders the rarity/path/element header as a block: this answers with ONE field and nothing
+     * else, which is the whole point of asking for it.
+     */
+    internal enum class CharField(val tag: String, val pick: (PersonagemHsr) -> String?) {
+        DESCRICAO("Descrição", { it.descricao }),
+        FACCAO("Facção", { it.faccao }),
+        RARIDADE("Raridade", { it.raridade?.let { r -> "$r estrelas" } }),
+        CAMINHO("Caminho", { it.caminho }),
+        ELEMENTO("Elemento", { it.elemento }),
+    }
+
     internal companion object {
+        /** Same listy-question ceiling as the build path. */
+        private const val MAX_CHARACTERS = 4
 
         /** Player vocabulary → ability kind, over normalized tokens. */
         private val KIND_CUES: Map<String, SkillKind> = mapOf(
@@ -124,14 +117,38 @@ class KitAnswerService(
         /** The whole sheet: profile header + abilities + traces + eidolons. */
         private val KIT_WORDS = setOf("kit", "kits")
 
-        /** Profile lines worth showing in a kit header (the lore Descrição is noise here). */
-        private val PROFILE_LINES = listOf("Raridade", "Caminho", "Elemento")
+        /**
+         * "talento do memoespírito" / "perícia da euforia" — an ability word BOUND to the
+         * memosprite or euphoria by a possessive. Matched (and consumed) as a phrase for the same
+         * reason "perícia suprema" is: the bare ability token would otherwise ALSO cue the base
+         * slot, and "o que o talento do memoespírito da hyacine faz?" answered with her regular
+         * Talento. The binding must be tight — "a perícia da desbravadora da euforia" is a
+         * question about the base skill of the Euphoria Trailblazer, and correctly misses here,
+         * because "euforia" there is the Path, not the ability.
+         */
+        private val MEMO_PHRASE =
+            Regex("\\b(pericia|habilidade|skill|talento|talent)\\s+(?:d[oae]\\s+)?(?:memoespiritos?|memosprites?)\\b")
+        private val EUPHORIA_PHRASE =
+            Regex("\\b(?:pericia|habilidade|skill)\\s+(?:d[oae]\\s+)?(?:euforia|elation)\\b")
 
-        /** First-line "Eidolon N" of an eidolon doc. */
-        private val EIDOLON_HEADER = Regex("Eidolon ([1-6])")
+        /**
+         * Player vocabulary → a single character column. Hand-mapped on purpose: the set of
+         * columns is closed and small, so a lookup table can't drift the way a generated
+         * projection could, and a word that isn't here simply leaves the question to the
+         * retrieval path.
+         */
+        // ponytail: hand-kept alias map; add a line when a word players actually use turns up missing.
+        private val FIELD_CUES: Map<String, CharField> = listOf(
+            CharField.DESCRICAO to "descricao descricoes description descreve",
+            CharField.FACCAO to "faccao faccoes faction afiliacao organizacao",
+            CharField.RARIDADE to "raridade rarity estrelas",
+            CharField.CAMINHO to "caminho caminhos path senda",
+            CharField.ELEMENTO to "elemento elementos element",
+        ).flatMap { (field, words) -> words.split(' ').map { it to field } }.toMap()
 
-        /** Last "(…)" group of a skill-doc header — the ability's type tag. */
-        private val TYPE_TAG = Regex("\\(([^()]+)\\)\\s*$")
+        /** Bare mentions — "o que o memoespírito da castorice faz?", with no ability word at all. */
+        private val MEMO_WORDS = setOf("memoespirito", "memoespiritos", "memosprite", "memosprites")
+        private val EUPHORIA_WORDS = setOf("euforia", "elation")
 
         /**
          * Raw cue scan, ignoring the build vocabulary. Null when nothing kit-shaped.
@@ -140,11 +157,25 @@ class KitAnswerService(
          */
         internal fun rawKitAsk(query: String): KitAsk? {
             val norm = HsrCharacterService.normalize(query)
-            val tokens = norm.split(' ')
             val kinds = mutableSetOf<SkillKind>()
+            // Memosprite/euphoria phrases are consumed BEFORE the token scan, so the ability word
+            // inside them ("talento" in "talento do memoespírito") can't also cue its base slot.
+            var scan = MEMO_PHRASE.replace(norm) { m ->
+                kinds += if (m.groupValues[1].startsWith("talen")) SkillKind.MEMO_TALENT else SkillKind.MEMO_SKILL
+                " "
+            }
+            scan = EUPHORIA_PHRASE.replace(scan) { kinds += SkillKind.EUPHORIA; " " }
+            val tokens = scan.split(' ')
             tokens.forEachIndexed { i, t ->
                 if (t == "pericia" && tokens.getOrNull(i + 1) == "suprema") return@forEachIndexed
                 KIND_CUES[t]?.let { kinds += it }
+            }
+            // Bare mention with no ability word: "o que o memoespírito da X faz?" means all of it.
+            // Gated on kinds being empty so a Path word ("desbravador da euforia") next to a real
+            // ability cue stays a Path — [HsrCharacterService.disambiguate] is what consumes it there.
+            if (kinds.isEmpty()) {
+                if (tokens.any { it in MEMO_WORDS }) kinds += listOf(SkillKind.MEMO_SKILL, SkillKind.MEMO_TALENT)
+                else if (tokens.any { it in EUPHORIA_WORDS }) kinds += SkillKind.EUPHORIA
             }
             if (tokens.any { it in ALL_KINDS_WORDS }) kinds += SkillKind.entries
             val nums = GameKnowledgeTools.EIDOLON_NUM.findAll(norm)
@@ -162,8 +193,9 @@ class KitAnswerService(
                 profile = true
                 if (eidolons == null) eidolons = emptySet()
             }
-            if (kinds.isEmpty() && eidolons == null && !traces) return null
-            return KitAsk(kinds, eidolons, traces, profile)
+            val fields = tokens.mapNotNull { FIELD_CUES[it] }.toSet()
+            if (kinds.isEmpty() && eidolons == null && !traces && fields.isEmpty()) return null
+            return KitAsk(kinds, eidolons, traces, profile, fields)
         }
 
         /** [rawKitAsk] gated on the build vocabulary: a question asking for BOTH families
@@ -171,53 +203,70 @@ class KitAnswerService(
         internal fun wantedKit(query: String): KitAsk? =
             rawKitAsk(query)?.takeIf { BuildAnswerService.wantedLabels(query).isEmpty() }
 
+        private fun skillOf(p: PersonagemHsr, k: SkillKind): NamedText = when (k) {
+            SkillKind.BASIC -> p.atqBasico
+            SkillKind.SKILL -> p.pericia
+            SkillKind.ULTIMATE -> p.periciaSuprema
+            SkillKind.TALENT -> p.talento
+            SkillKind.TECHNIQUE -> p.tecnica
+            SkillKind.MEMO_SKILL -> p.periciaMemoespirito
+            SkillKind.MEMO_TALENT -> p.talentoMemoespirito
+            SkillKind.EUPHORIA -> p.periciaEuforia
+        }
+
         /**
-         * The asked docs rendered verbatim — bold header line, description as stored — in
-         * fixed sheet order: profile header, abilities in canonical kit order, major
-         * traces, eidolons by number. Null when this character has none of the asked
-         * docs, so the caller falls through. [docsByCategory] is the character's docs
-         * keyed by vector_store category. Pure.
+         * The asked pieces of [p]'s kit as bold-headed blocks in fixed sheet order: profile
+         * header, abilities in canonical order, memoespírito/euforia (full-kit only), major
+         * traces, eidolons by number. Null when this character has none of the asked pieces, so
+         * the caller falls through. Pure — [PersonagemHsr] is a plain model, so this is
+         * unit-testable without a DB.
          */
-        internal fun renderKit(docsByCategory: Map<String, List<String>>, ask: KitAsk): String? {
-            val skillDocs = docsByCategory["skill"].orEmpty()
+        internal fun renderKit(
+            p: PersonagemHsr,
+            ask: KitAsk,
+            who: String = p.nome ?: p.nomeEn ?: p.characterId,
+        ): String? {
             val blocks = mutableListOf<String>()
-            if (ask.profile) {
-                docsByCategory["profile"].orEmpty().firstOrNull()?.let { blocks += profileHeader(it) }
+            if (ask.profile) profileHeader(p, who)?.let { blocks += it }
+            // Single-column asks render as one labeled line each, in declaration order.
+            for (field in ask.fields.sortedBy { it.ordinal }) {
+                field.pick(p)?.takeIf { it.isNotBlank() }?.let { blocks += "**$who — ${field.tag}**\n$it" }
             }
+            // Memoespírito/euforia are ordinary kinds now (they used to render only under the
+            // full-kit profile flag), so a question naming one directly gets exactly that block.
             for (kind in ask.kinds.sortedBy { it.ordinal }) {
-                skillDocs.filter { typeTag(it) in kind.tags }.forEach { blocks += bolded(it) }
+                block(who, kind.tag, skillOf(p, kind))?.let { blocks += it }
             }
             if (ask.traces) {
-                docsByCategory["trace"].orEmpty().forEach { blocks += bolded(it) }
+                p.tracos.forEach { block(who, "traço maior", it)?.let { b -> blocks += b } }
             }
             ask.eidolons?.let { nums ->
-                docsByCategory["eidolon"].orEmpty()
-                    .mapNotNull { d -> eidolonNumber(d)?.let { n -> n to d } }
-                    .filter { (n, _) -> nums.isEmpty() || n in nums }
-                    .sortedBy { (n, _) -> n }
-                    .forEach { (_, d) -> blocks += bolded(d) }
+                p.eidolons.forEachIndexed { i, eid ->
+                    val n = i + 1
+                    if ((nums.isEmpty() || n in nums) && !eid.isBlank) {
+                        blocks += block(who, "Eidolon $n", eid) ?: return@forEachIndexed
+                    }
+                }
             }
-            if (blocks.isEmpty()) return null
-            return blocks.joinToString("\n\n")
+            return blocks.takeIf { it.isNotEmpty() }?.joinToString("\n\n")
         }
 
-        /** Bold title + only the rarity/path/element lines of a profile doc. */
-        private fun profileHeader(doc: String): String {
-            val lines = doc.trim().lines()
-            val facts = lines.drop(1).filter { l -> PROFILE_LINES.any(l::startsWith) }
-            return (listOf("**${lines.first().trimEnd('.', ' ')}**") + facts).joinToString("\n")
+        /** `**{who} — {rarity/path/element}**` header; null when the row carries none of them. */
+        private fun profileHeader(p: PersonagemHsr, who: String): String? {
+            val facts = listOfNotNull(
+                p.raridade?.let { "Raridade: $it estrelas" },
+                p.caminho?.let { "Caminho: $it" },
+                p.elemento?.let { "Elemento: $it" },
+            )
+            if (facts.isEmpty()) return null
+            return (listOf("**$who — Honkai: Star Rail**") + facts).joinToString("\n")
         }
 
-        internal fun typeTag(doc: String): String? =
-            TYPE_TAG.find(doc.lineSequence().first())?.groupValues?.get(1)?.trim()
-
-        private fun eidolonNumber(doc: String): Int? =
-            EIDOLON_HEADER.find(doc.lineSequence().first())?.groupValues?.get(1)?.toInt()
-
-        private fun bolded(doc: String): String {
-            val lines = doc.trim().lines()
-            val body = lines.drop(1).joinToString("\n").trim()
-            return if (body.isEmpty()) "**${lines.first()}**" else "**${lines.first()}**\n$body"
+        /** `**{who} — {label}: {nome}**\n{descricao}` for one ability/trace/eidolon; null if blank. */
+        private fun block(who: String, label: String, nt: NamedText): String? {
+            if (nt.isBlank) return null
+            val header = "**$who — $label" + (nt.nome?.let { ": $it" } ?: "") + "**"
+            return nt.descricao?.takeIf { it.isNotBlank() }?.let { "$header\n$it" } ?: header
         }
     }
 }

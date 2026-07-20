@@ -10,7 +10,6 @@ import com.cyrene.conversation.MessageRole
 import com.cyrene.conversation.UsuarioService
 import com.cyrene.discord.ChainEntry
 import com.cyrene.discord.ReplyChainResolver
-import com.cyrene.discord.tools.DiscordToolContext
 import com.cyrene.discord.util.BotMessages
 import com.cyrene.discord.util.DiscordMessageSender
 import com.cyrene.discord.util.ProgressStatus
@@ -35,9 +34,6 @@ import java.util.concurrent.TimeUnit
  * channel never bleed into each other. The user block resolved by [UsuarioService]
  * (effective name, live highest role and permissions, plus whatever the user asked the bot
  * to remember) is injected as a system block.
- *
- * Moderation tool authority is NOT trusted from the cached flags — `DiscordTools.executeMod`
- * still re-verifies caller permissions live against JDA before acting.
  */
 @Component
 class MentionReplyListener(
@@ -66,8 +62,7 @@ class MentionReplyListener(
     override fun onMessageReceived(event: MessageReceivedEvent) {
         if (event.author.isBot) return
         if (conversations.isInActiveSession(event.author.id, event.channel.id)) return
-        val testChannelId = properties.testChannelId
-        if (!testChannelId.isNullOrBlank() && event.channel.id != testChannelId) return
+        if (!properties.allowsChannel(event.channel.id, event.isFromGuild)) return
 
         val selfUser = event.jda.selfUser
         // Allow processing for either an explicit mention OR when the incoming
@@ -104,12 +99,6 @@ class MentionReplyListener(
             return
         }
 
-        val toolContext = DiscordToolContext(
-            callerUserId = event.author.id,
-            guildId = if (event.isFromGuild) event.guild.id else null,
-            channelId = event.channel.id,
-        )
-
         // Immediate feedback while the (slow, local) LLM pipeline runs; stopped in the
         // same completion handler that releases the gate permit. The progress status is a
         // reply that gets edited as pipeline stages advance, then deleted with the answer.
@@ -139,9 +128,8 @@ class MentionReplyListener(
                         )
                         val history = buildHistory(chain, referenced, currentName, content, selfUser.id)
 
-                        ai.chatBrainAndVoice(
+                        ai.respond(
                             history = history,
-                            toolContext = toolContext,
                             extraSystemPrompt = resolved?.systemPrompt,
                             userName = resolved?.effectiveName,
                             progress = progress,

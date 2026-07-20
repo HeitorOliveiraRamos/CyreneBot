@@ -1,5 +1,6 @@
 package com.cyrene.knowledge
 
+import com.cyrene.hsr.ItemEffect
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -7,8 +8,8 @@ import kotlin.test.assertTrue
 
 /**
  * Locks the pure core of the deterministic item path: which questions count as
- * effect-shaped ([ItemAnswerService.wantsItem]) and the verbatim doc render
- * ([ItemAnswerService.rendered]).
+ * effect-shaped ([ItemAnswerService.wantsItem]) and the render of an [ItemEffect]
+ * row ([ItemAnswerService.rendered]).
  */
 class ItemAnswerServiceTest {
 
@@ -37,13 +38,20 @@ class ItemAnswerServiceTest {
     // -------------------- rendered -------------------- //
 
     @Test
-    fun `render bolds the title, drops the game-name boilerplate and keeps the body verbatim`() {
-        val doc = "Arena Rutilante — Ornamento Planar (Planar Ornament) de Honkai: Star Rail.\n" +
-            "Bônus 2 peças: Aumenta a Taxa de CRIT em 8%."
+    fun `render bolds the name and kind and keeps the effect lines`() {
+        val item = ItemEffect(
+            "Arena Rutilante", "Ornamento Planar (Planar Ornament)",
+            listOf("Bônus 2 peças: Aumenta a Taxa de CRIT em 8%."),
+        )
         assertEquals(
             "**Arena Rutilante — Ornamento Planar (Planar Ornament)**\n" +
                 "Bônus 2 peças: Aumenta a Taxa de CRIT em 8%.",
-            ItemAnswerService.rendered(doc),
+            ItemAnswerService.rendered(item),
         )
+    }
+
+    @Test
+    fun `an item with no effect lines renders just the bold header`() {
+        assertEquals("**X — Cone de Luz (Light Cone)**", ItemAnswerService.rendered(ItemEffect("X", "Cone de Luz (Light Cone)", emptyList())))
     }
 }

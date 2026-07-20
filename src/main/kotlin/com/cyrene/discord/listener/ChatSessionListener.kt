@@ -8,7 +8,6 @@ import com.cyrene.conversation.ConversationMessage
 import com.cyrene.conversation.ConversationService
 import com.cyrene.conversation.MessageRole
 import com.cyrene.conversation.UsuarioService
-import com.cyrene.discord.tools.DiscordToolContext
 import com.cyrene.discord.util.BotMessages
 import com.cyrene.discord.util.DiscordMessageSender
 import com.cyrene.discord.util.ProgressStatus
@@ -26,8 +25,8 @@ import java.util.concurrent.Executor
  *
  * Like the @-mention path, this listener injects the user block resolved by
  * [UsuarioService] as a system block so the voice model knows the user's name (avoiding
- * leaked `{nome}` placeholders from the persona examples) and the brain sees the caller's
- * live role/permissions plus whatever the user asked the bot to remember.
+ * leaked `{nome}` placeholders from the persona examples) plus whatever the user asked the
+ * bot to remember.
  *
  * The user turn is no longer persisted before the AI call — exchanges are written as a
  * single combined row after the reply lands. A crash mid-call therefore loses the
@@ -56,8 +55,7 @@ class ChatSessionListener(
         val userId = message.author.id
         val channelId = message.channel.id
 
-        val testChannelId = properties.testChannelId
-        if (!testChannelId.isNullOrBlank() && channelId != testChannelId) return
+        if (!properties.allowsChannel(channelId, event.isFromGuild)) return
 
         val active = conversations.activeConversation(userId, channelId) ?: return
         val conversationId = active.id ?: return
@@ -67,12 +65,6 @@ class ChatSessionListener(
         // in-memory before the AI call (inside the async block, where the vision pass can
         // augment it) and persisted atomically afterwards along with the reply.
         val priorHistory = conversations.history(conversationId)
-
-        val toolContext = DiscordToolContext(
-            callerUserId = userId,
-            guildId = if (event.isFromGuild) event.guild.id else null,
-            channelId = channelId,
-        )
 
         // Share the same concurrency ceiling as the mention path so an active session and a
         // burst of mentions can't together overload the single Ollama. When full, ask the
@@ -105,9 +97,8 @@ class ChatSessionListener(
                             role = MessageRole.USER,
                             content = contentForAi,
                         )
-                        contentForAi to ai.chatBrainAndVoice(
+                        contentForAi to ai.respond(
                             history = historyForAi,
-                            toolContext = toolContext,
                             extraSystemPrompt = resolved?.systemPrompt,
                             userName = resolved?.effectiveName,
                             progress = progress,

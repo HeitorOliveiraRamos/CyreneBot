@@ -1,7 +1,6 @@
 package com.cyrene.knowledge
 
 import com.cyrene.config.BotProperties
-import com.cyrene.hsr.HsrCharacterService
 import org.slf4j.LoggerFactory
 import org.springframework.ai.document.Document
 import org.springframework.ai.vectorstore.VectorStore
@@ -11,30 +10,26 @@ import org.springframework.stereotype.Component
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Rebuilds the Honkai: Star Rail vector store from two structured-JSON sources:
- * [StarRailStationIngestionSource] (PT-BR profiles/skills/eidolons/traces/light cones/relic sets)
- * and [NanokaIngestionSource] (English builds and enemies — the categories srs doesn't serve).
- * srs owns the high-value, most-queried kit docs in real Portuguese; nanoka fills the gaps.
+ * Rebuilds the Honkai: Star Rail vector store from the rich V17 tables via [TableKnowledgeSource]
+ * — an offline DB read, not a live fetch. The harvest into those tables ([com.cyrene.hsr
+ * .SrsNanokaHarvester]) is the single upstream fetch; this only re-renders and re-embeds what it
+ * already stored, so a reindex can't half-fail on a bad upstream response.
  *
  * Two triggers, same [reindex] body:
  *  - startup, when `bot.knowledge.reindex=true` (`HSR_REINDEX=true mvn spring-boot:run`) —
  *    the manual, run-once path;
  *  - [KbFreshnessCheck], when `bot.knowledge.auto-reindex` is on and nanoka starts serving
- *    a newer data version than the one indexed — the hands-off path. srs's deploy moves with the
- *    same patch, so nanoka's version signal doubles as the trigger for both.
+ *    a newer data version than the one indexed — the hands-off path.
  *
- * Documents are loaded BEFORE the truncate, so a broken fetch never wipes a working KB. If
- * starrailstation is unreachable, [reindex] falls back to FULL (English) nanoka rather than lose
- * profiles/skills/eidolons entirely — degraded, but never empty.
+ * Documents are loaded BEFORE the truncate, so an empty read never wipes a working KB.
  */
 @Component
 class HsrKnowledgeIngestion(
     private val vectorStore: VectorStore,
     private val jdbcTemplate: JdbcTemplate,
     private val properties: BotProperties,
-    private val srs: StarRailStationIngestionSource,
     private val nanoka: NanokaIngestionSource,
-    private val characters: HsrCharacterService,
+    private val tableSource: TableKnowledgeSource,
 ) : CommandLineRunner {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -48,28 +43,20 @@ class HsrKnowledgeIngestion(
         log.info("Restart WITHOUT HSR_REINDEX to run normally.")
     }
 
-    /** Full rebuild: load from nanoka, truncate, embed, record version. Safe to call live. */
+    /** Full rebuild: render docs from the V17 tables, truncate, embed, record version. Safe to call live. */
     fun reindex() {
         if (!running.compareAndSet(false, true)) {
             log.warn("Reindex já em andamento — ignorando pedido concorrente.")
             return
         }
         try {
-            // srs (PT) owns profile/skill/eidolon/trace/light_cone/relic_set; nanoka fills the rest.
-            // srs down → full English nanoka rather than lose the core kit docs. Loaded before the
-            // truncate so a broken source never wipes a working KB. Nanoka's docs render names
-            // through the srs PT maps (+ hsr_character for team members) so build docs list items
-            // by the SAME strings as the PT item docs — the effectDocs join depends on it.
-            val srsData = srs.load()
-            val nanokaDocs = nanoka.load(srsData.relicNames, srsData.coneNames, characters.ptNames())
-            val docs = if (srsData.docs.isEmpty()) {
-                log.warn("starrailstation returned 0 documents — falling back to full (English) nanoka.")
-                nanokaDocs
-            } else {
-                srsData.docs + nanokaDocs.filter { it.metadata["category"] in NANOKA_ONLY_CATEGORIES }
-            }
+            // Rendered from the V17 tables (already clean PT); loaded before the truncate so an
+            // empty read never wipes a working KB. Build docs list item names by the SAME strings
+            // as the relic_set/light_cone docs (all from the item tables' nome) — the effectDocs
+            // exact-name join depends on it.
+            val docs = tableSource.load()
             if (docs.isEmpty()) {
-                log.error("Parsed 0 usable documents from both sources — aborting before clearing the store.")
+                log.error("Rendered 0 documents from the V17 tables — aborting before clearing the store.")
                 return
             }
 
@@ -114,10 +101,5 @@ class HsrKnowledgeIngestion(
             vectorStore.add(batch)
             log.info("  embedded batch {}/{} ({} docs)", i + 1, batches.size, batch.size)
         }
-    }
-
-    private companion object {
-        /** Categories starrailstation can't serve, so nanoka keeps them (see class kdoc). */
-        private val NANOKA_ONLY_CATEGORIES = setOf("build", "enemy")
     }
 }

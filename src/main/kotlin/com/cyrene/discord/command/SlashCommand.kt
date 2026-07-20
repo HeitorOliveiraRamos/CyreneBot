@@ -12,3 +12,11 @@ interface SlashCommand {
     val definition: CommandData
     fun handle(event: SlashCommandInteractionEvent)
 }
+
+/**
+ * Replies privately and returns — the shape every refusal in the moderation commands takes,
+ * so a rejected action never spams the channel with the reason.
+ */
+fun SlashCommandInteractionEvent.replyEphemeral(message: String) {
+    reply(message).setEphemeral(true).queue()
+}

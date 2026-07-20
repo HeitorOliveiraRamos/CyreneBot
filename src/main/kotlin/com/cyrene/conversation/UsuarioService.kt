@@ -1,6 +1,5 @@
 package com.cyrene.conversation
 
-import net.dv8tion.jda.api.Permission
 import net.dv8tion.jda.api.entities.Member
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent
 import org.slf4j.LoggerFactory
@@ -11,16 +10,15 @@ import java.time.OffsetDateTime
 /**
  * Dono da memória de usuário do bot. Há dois tipos de dado que passam por aqui:
  *
- *  - **Identidade ao vivo** (nome, cargo mais alto, permissões de moderação): lida fresca da
- *    JDA a cada interação e injetada no prompt. Cargo/permissões NUNCA são persistidos — variam
- *    por servidor e são baratos de buscar. Só o nome efetivo é guardado (em [Usuario.nome]),
- *    atualizado a cada interação.
+ *  - **Identidade ao vivo** (nome, cargo mais alto): lida fresca da JDA a cada interação e
+ *    injetada no prompt. O cargo NUNCA é persistido — varia por servidor e é barato de buscar.
+ *    Só o nome efetivo é guardado (em [Usuario.nome]), atualizado a cada interação.
  *
  *  - **Memória persistida** ([Usuario.memoria]): um texto livre que o próprio usuário escolhe
  *    que o bot guarde, definido pelo comando `/memoria`. Fica nulo até o usuário definir algo.
  *
- * A autoridade das ferramentas de moderação é independente disso: [com.cyrene.discord.tools.DiscordTools]
- * re-verifica as permissões do chamador ao vivo na JDA antes de qualquer ação destrutiva.
+ * Nada aqui concede autoridade: a moderação é feita só por comandos de barra, e quem pode
+ * executá-los é decidido pelo próprio Discord (ver `com.cyrene.discord.command.ModerationGuards`).
  */
 @Service
 class UsuarioService(
@@ -131,18 +129,12 @@ class UsuarioService(
         appendLine("## Sobre o usuário com quem você está falando")
         appendLine("- Nome: $nome")
         member.roles.maxByOrNull { it.position }?.let { appendLine("- Cargo mais alto: ${it.name}") }
-        appendLine("- Permissões de moderação: ${renderPermissions(member)}")
     }.trimEnd()
 
     private fun renderDmIdentity(): String = buildString {
         appendLine("## Sobre o usuário com quem você está falando")
-        appendLine("- Contexto: conversa privada (DM), sem cargos ou permissões de servidor")
+        appendLine("- Contexto: conversa privada (DM), sem cargos de servidor")
     }.trimEnd()
-
-    private fun renderPermissions(member: Member): String {
-        val flags = MODERATION_PERMISSIONS.filter { member.hasPermission(it.first) }.map { it.second }
-        return if (flags.isEmpty()) "nenhuma" else flags.joinToString(", ")
-    }
 
     private fun renderMemory(memoria: String?, name: String): String? {
         val texto = memoria?.takeIf { it.isNotBlank() } ?: return null
@@ -152,18 +144,6 @@ class UsuarioService(
         }.trimEnd()
     }
 
-    companion object {
-        private val MODERATION_PERMISSIONS = listOf(
-            Permission.ADMINISTRATOR to "administrator",
-            Permission.KICK_MEMBERS to "kickMembers",
-            Permission.BAN_MEMBERS to "banMembers",
-            Permission.MODERATE_MEMBERS to "moderateMembers",
-            Permission.MESSAGE_MANAGE to "manageMessages",
-            Permission.MANAGE_CHANNEL to "manageChannel",
-            Permission.MANAGE_ROLES to "manageRoles",
-            Permission.MANAGE_SERVER to "manageGuild",
-        )
-    }
 }
 
 /**

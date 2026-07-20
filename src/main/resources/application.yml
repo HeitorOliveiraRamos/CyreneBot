@@ -115,9 +115,11 @@ bot:
     can-mention-here-and-everyone: false
   context:
     history-fetch-size: 50
-  # When set, message listeners only respond in this channel — used to scope the bot
-  # to a staging channel during local testing. Leave blank/unset to listen everywhere.
-  test-channel-id: ${TEST_CHANNEL_ID:}
+  # Allow-list of channel IDs the bot works in — comma-separated, e.g.
+  #   TEST_CHANNEL_IDS=123456789012345678,987654321098765432
+  # When set, both the message listeners AND the slash commands ignore any other GUILD
+  # channel. DMs are never restricted by this. Leave blank/unset to work everywhere.
+  test-channel-ids: ${TEST_CHANNEL_IDS:}
 
   # Honkai: Star Rail knowledge base (RAG). Feeds the lookupHsr / searchWeb tools.
   knowledge:

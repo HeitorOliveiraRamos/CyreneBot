@@ -6,23 +6,19 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 data class BotProperties(
     val token: String,
     val personalityFile: String = "classpath:prompts/cyrene-personality.md",
-    /**
-     * The default Ollama model used by legacy single-pass paths (e.g. `/contexto-do-canal`).
-     * MUST be a tool-capable model when tool calling is exercised — verified options
-     * include llama3.1, llama3.2, qwen2.5, mistral-nemo.
-     */
+    /** The Ollama model used by the legacy single-pass path (`/contexto-do-canal`). */
     val modelName: String,
     /**
-     * Model used by the "brain" pass — decides whether to call a Discord tool and
-     * produces a factual, neutral description of what was done. MUST be tool-capable.
-     * Today defaults to llama3.1; can be swapped to a smaller/faster model later without
-     * touching the voice pass.
+     * Model used by the constrained, classification-shaped passes: the intent gate, the
+     * follow-up condenser and the grounding judge. Each only has to emit a word or a line,
+     * so this wants to be the small/hot one — it is called on nearly every message and its
+     * latency is felt directly. (Named "brain" for the pass it used to serve; the config key
+     * is kept so existing deployments don't have to change.)
      */
     val brainModelName: String = "llama3.1",
     /**
-     * Model used by the "voice" pass — rewrites the brain's factual output as Cyrene,
-     * in persona, without tool callbacks. Today defaults to llama3.1; can later be
-     * swapped to a model tuned for prose/persona quality independent of the brain.
+     * Model used by the "voice" pass — every user-visible reply, whether it's persona chat
+     * or the retelling of retrieved HSR facts. This is the one to swap for prose quality.
      */
     val voiceModelName: String = "llama3.1",
     /**
@@ -38,19 +34,30 @@ data class BotProperties(
     val performance: Performance = Performance(),
     val knowledge: Knowledge = Knowledge(),
     /**
-     * Directory of skill files (one .md per skill) for [com.cyrene.skills.SkillTools].
-     * Relative to the working directory. Missing directory = feature off.
+     * Allow-list of Discord channel IDs the bot operates in. When non-empty, both the
+     * message listeners ([com.cyrene.discord.listener.MentionReplyListener],
+     * [com.cyrene.discord.listener.ChatSessionListener]) and every slash command
+     * ([com.cyrene.discord.command.CommandRouter]) ignore any guild channel not listed.
+     * Empty (the default) = every channel, i.e. production behaviour.
+     *
+     * Bound from the comma-separated `TEST_CHANNEL_IDS` env var. DMs are NEVER gated by
+     * this — they have no guild to scope and `/limpar` is DM-only — so an allow-list
+     * restricts the servers, not the bot's private conversations.
      */
-    val skillsDir: String = "skills",
-    /**
-     * When set to a non-blank Discord channel ID, the message listeners
-     * ([com.cyrene.discord.listener.MentionReplyListener] and
-     * [com.cyrene.discord.listener.ChatSessionListener]) ignore messages from any other
-     * channel. Used to scope the bot to a single staging channel during local testing.
-     * Leave unset/blank in production to listen everywhere.
-     */
-    val testChannelId: String? = null,
+    val testChannelIds: List<String> = emptyList(),
 ) {
+
+    /**
+     * True when [channelId] may be served. [isFromGuild] false (a DM) always passes; see
+     * [testChannelIds]. Blank entries are tolerated so `TEST_CHANNEL_IDS=` and a stray
+     * trailing comma both mean "no restriction".
+     */
+    fun allowsChannel(channelId: String, isFromGuild: Boolean): Boolean {
+        if (!isFromGuild) return true
+        val allowed = testChannelIds.filter { it.isNotBlank() }
+        return allowed.isEmpty() || channelId in allowed
+    }
+
     data class Reply(
         val cooldownSeconds: Long = 5,
         val chain: ReplyChain = ReplyChain(),
@@ -93,16 +100,16 @@ data class BotProperties(
      *
      *  - [numCtx]: context window. Default 16384 is sized for the knowledge path, whose
      *    worst case feeds ~2×18000 chars of fetched web text (see [Knowledge.webFetchCharLimit])
-     *    plus the brain prompt and reply budget; a smaller ctx would silently truncate that
+     *    plus the prompt and reply budget; a smaller ctx would silently truncate that
      *    web text and clip kit numbers. Lower it (and/or [Knowledge.webFetchPages]) only if
      *    you're memory-constrained and don't use deep web fetches — larger ctx grows the KV cache.
      *  - [numPredict]: hard cap on generated tokens. Prevents runaway replies.
      *  - [numThread]: CPU threads. Ignored when the model fits fully on GPU; set to your
      *    physical core count if any layers spill to CPU.
-     *  - [brainTemperature] / [brainTopP]: sampling for the brain pass and the intent
-     *    gate. Both are classification-like — should be tight. Raising these makes the
-     *    brain hallucinate tool calls more often, which is exactly what we want to avoid.
-     *  - [voiceTemperature]: sampling for the persona (voice) pass. Higher than brain —
+     *  - [brainTemperature] / [brainTopP]: sampling for the constrained passes (intent gate,
+     *    condenser, judge). All classification-like — should be tight, or the gate starts
+     *    inventing verdicts instead of picking one.
+     *  - [voiceTemperature]: sampling for the persona (voice) pass. Higher than the above —
      *    natural prose benefits from some diversity. Too low → flat replies; too high →
      *    persona drift.
      */
@@ -131,21 +138,18 @@ data class BotProperties(
         val brainTopP: Double = 0.5,
         val voiceTemperature: Double = 0.8,
         /**
-         * Token budget for the knowledge path — both the brain's HSR extraction and the
-         * voice's persona rewrite of it. Much larger than [numPredict] because a full
-         * character kit (every ability + multipliers + traces + Eidolons), and the
-         * persona retelling of it, easily blow past the 512-token chat default that is
-         * fine for a one-line moderation confirmation. Applied to the brain pass always
-         * (it's only a ceiling — moderation replies still stop after a sentence) and to
-         * the knowledge voice pass.
+         * Token budget for the knowledge path's voice retelling. Much larger than
+         * [numPredict] because a full character kit (every ability + multipliers + traces +
+         * Eidolons), and the persona retelling of it, easily blow past the 512-token chat
+         * default. It is only a ceiling — a short answer still stops when it's done.
          */
         val knowledgeNumPredict: Int = 2048,
     )
 
     /**
      * Honkai: Star Rail RAG knowledge base. Backs the `lookupHsr` (local vector search)
-     * and `searchWeb` (online fallback) tools in
-     * [com.cyrene.discord.tools.GameKnowledgeTools], plus the one-shot ingestion runner
+     * and `searchWeb` (online fallback) retrieval in
+     * [com.cyrene.knowledge.GameKnowledgeTools], plus the one-shot ingestion runner
      * [com.cyrene.knowledge.HsrKnowledgeIngestion].
      *
      *  - [reindex]: when true, the ingestion runner wipes and rebuilds the vector store on

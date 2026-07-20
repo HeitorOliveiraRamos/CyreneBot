@@ -20,7 +20,7 @@ import java.time.Duration
  *    character-specific recommendation is kept;
  *  - StarRailRes (Mar-7th): only the en→pt relic-set name mapping, to render set names in PT.
  *
- * Names and full kit text now come from [HsrCharacterHarvester]; this source is purely the
+ * Names and full kit text come from the V17 tables ([PersonagemHsr]); this source is purely the
  * `/build` scoring fallback. Called only from [HsrCharacterService]'s scheduled staleness
  * check (~monthly). Shared fetches throw on failure so the caller keeps the previous rows;
  * a single unparsable character file is skipped with a warning.
@@ -43,7 +43,7 @@ class FribbelsHarvester(
         .build()
 
     /** Game id → fribbels build metadata. Empty ids (the `*B1.ts` reruns with no numeric config
-     *  id) and unparsable configs are skipped; names/kit now come from [HsrCharacterHarvester]. */
+     *  id) and unparsable configs are skipped; names/kit come from the V17 tables. */
     fun harvest(): Map<String, FribbelsMeta> {
         val srr = properties.knowledge.starRailResBase
         val setPtByEn = relicSetPtByEnName(srr)

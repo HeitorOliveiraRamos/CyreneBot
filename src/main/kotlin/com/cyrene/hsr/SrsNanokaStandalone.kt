@@ -37,8 +37,8 @@ fun main() {
     val mapper = ObjectMapper()
     val harvester = SrsNanokaHarvester(
         props, mapper,
-        NanokaIngestionSource(props, mapper),
-        StarRailStationIngestionSource(props, mapper),
+        NanokaIngestionSource(props),
+        StarRailStationIngestionSource(props),
     )
     SrsNanokaPopulator(props, JdbcTemplate(ds), harvester).populate()
     log.info("Populate concluído.")

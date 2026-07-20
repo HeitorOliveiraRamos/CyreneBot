@@ -53,7 +53,12 @@ data class PersonagemHsr(
     val historias: List<String?> = emptyList(),
 )
 
-/** One `reliquias` row: a Cavern set's 2/4-piece bonuses plus its four pieces (Cabeça…Pés). */
+/**
+ * One `reliquias` row: a Cavern set's 2/4-piece bonuses plus its four pieces (Cabeça…Pés).
+ * [gameId] is transient (the shared game id, srs `pageId` == the nanoka set id a build's
+ * `set4_id_list` references) — carried only in memory so [SrsNanokaPopulator] can resolve a
+ * recommended build's relic FKs, never a column.
+ */
 data class Reliquia(
     val nome: String,
     val efeito2Pecas: String? = null,
@@ -62,14 +67,40 @@ data class Reliquia(
     val maos: NamedText = NamedText.EMPTY,
     val corpo: NamedText = NamedText.EMPTY,
     val pes: NamedText = NamedText.EMPTY,
+    val gameId: String? = null,
 )
 
-/** One `ornamentos_planos` row: a Planar set's 2-piece bonus plus its Sphere and Rope. */
+/**
+ * One `ornamentos_planos` row: a Planar set's 2-piece bonus plus its Sphere and Rope.
+ * [gameId] mirrors [Reliquia.gameId] (srs `pageId` == the nanoka set id a build's
+ * `set2_id_list` references) — transient, for the builds FK join only.
+ */
 data class OrnamentoPlano(
     val nome: String,
     val efeito2Pecas: String? = null,
     val esfera: NamedText = NamedText.EMPTY,
     val corda: NamedText = NamedText.EMPTY,
+    val gameId: String? = null,
+)
+
+/**
+ * One `builds` row — a character's recommended build, from nanoka's per-character recommendation
+ * lists (the same `set4_id_list`/`set2_id_list`/`lightcones`/`property_list`/`teams` the build
+ * docs are rendered from). Item references are shared game ids, ordered best-first and capped to
+ * the table's 3 slots; [SrsNanokaPopulator] resolves them to FKs via the same PK maps as the
+ * signature link. The stat/team fields are pre-rendered PT strings (free-TEXT columns).
+ */
+data class Build(
+    val characterGameId: String,
+    val reliquiaGameIds: List<String> = emptyList(),
+    val ornamentoGameIds: List<String> = emptyList(),
+    val coneGameIds: List<String> = emptyList(),
+    val mainStatCorpo: String? = null,
+    val mainStatPes: String? = null,
+    val mainStatEsfera: String? = null,
+    val mainStatCorda: String? = null,
+    val substatusRecomendados: String? = null,
+    val equipeRecomendada: String? = null,
 )
 
 /**
@@ -78,7 +109,7 @@ data class OrnamentoPlano(
  * afterward from the signature map, not here.
  */
 data class ConeDeLuz(
-    val coneGameId: String,
+    val coneGameId: String = "", // transient; "" when read back from the DB (no game-id column)
     val nome: String,
     val caminho: String? = null,
     val raridade: Int? = null,
@@ -98,4 +129,5 @@ data class SrsNanokaData(
     val ornamentos: List<OrnamentoPlano>,
     val cones: List<ConeDeLuz>,
     val signatureLinks: Map<String, String>,
+    val builds: List<Build> = emptyList(),
 )

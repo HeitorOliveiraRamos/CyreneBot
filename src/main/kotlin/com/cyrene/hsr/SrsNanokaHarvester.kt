@@ -22,9 +22,9 @@ import java.net.http.HttpResponse
 import java.time.Duration
 
 /**
- * Harvests the rich V17 schema ([PersonagemHsr] / [Reliquia] / [OrnamentoPlano] / [ConeDeLuz])
- * from the two structured-JSON sources, PT-first — the eventual replacement for
- * [HsrCharacterHarvester]. Same spine/overlay join as that class:
+ * Harvests the rich V17 schema ([PersonagemHsr] / [Reliquia] / [OrnamentoPlano] / [ConeDeLuz] /
+ * [Build]) from the two structured-JSON sources, PT-first — the single upstream fetch behind both
+ * the deterministic answers and the vector store:
  *
  *  - **nanoka** ([NanokaIngestionSource]) is the SPINE for characters and light cones — its
  *    numeric id index lists every id including betas srs hasn't published. Text is English.
@@ -32,9 +32,9 @@ import java.time.Duration
  *    `rankKey` == the numeric id), plus the SOLE source of relic/ornament pieces (nanoka carries
  *    no per-piece lore).
  *
- * Beyond [HsrCharacterHarvester] this splits every ability/eidolon/trace into a name/description
- * pair, and adds memosprite (Recordação), euphoria (Euforia), relic/ornament pieces and light-cone
- * lore. The two ingestion beans are injected only to reuse their version/deployment discovery and
+ * Every ability/eidolon/trace is split into a name/description pair, plus memosprite (Recordação),
+ * euphoria (Euforia), relic/ornament pieces, light-cone lore and the recommended [Build]. The two
+ * ingestion beans are injected only to reuse their version/deployment discovery and
  * hardened pure parsers (skill grouping, trace walk, [fill]/[strip], the srs path [hashPath]);
  * every extractor is a pure companion function, fixture-tested.
  *
@@ -80,6 +80,9 @@ class SrsNanokaHarvester(
         // -------- characters + raw signature links (5★ char → its top nanoka cone) --------
         val personagens = mutableListOf<PersonagemHsr>()
         val rawSig = mutableMapOf<String, String>() // coneGameId -> characterGameId
+        // charGameId -> nanoka detail, kept to build recommended builds after every name is known
+        // (a build's team members are OTHER characters, resolved to display names in a second pass).
+        val buildInputs = mutableListOf<Pair<String, JsonNode>>()
         var withPt = 0
         for ((id, meta) in charIndex.fields()) {
             val srsEntry = srsByRankKey[id]
@@ -90,6 +93,7 @@ class SrsNanokaHarvester(
             val nanDetail = getJson("$nanoBase/en/character/$id.json")
             val p = buildPersonagem(id, meta, srsEntry, srsDetail, nanDetail)
             personagens += p
+            nanDetail?.let { buildInputs += id to it }
             if (p.raridade == 5) {
                 children(nanDetail?.path("lightcones") ?: mapper.nullNode()).firstOrNull()
                     ?.asText("")?.ifBlank { null }?.let { rawSig[it] = id }
@@ -132,11 +136,15 @@ class SrsNanokaHarvester(
         val coneRar = cones.associate { it.coneGameId to it.raridade }
         val signatureLinks = rawSig.filter { (coneId, _) -> coneRar[coneId] == 5 }
 
+        // -------- recommended builds (nanoka lists; team names resolved now every char is known) --------
+        val displayNames = personagens.associate { it.characterId to (it.nome ?: it.nomeEn ?: it.characterId) }
+        val builds = buildInputs.mapNotNull { (cid, nd) -> buildBuild(cid, nd, displayNames) }
+
         log.info(
-            "srs_nanoka: {} personagens ({} com PT), {} relíquias, {} ornamentos, {} cones, {} assinaturas",
-            personagens.size, withPt, reliquias.size, ornamentos.size, cones.size, signatureLinks.size,
+            "srs_nanoka: {} personagens ({} com PT), {} relíquias, {} ornamentos, {} cones, {} assinaturas, {} builds",
+            personagens.size, withPt, reliquias.size, ornamentos.size, cones.size, signatureLinks.size, builds.size,
         )
-        return SrsNanokaData(personagens, reliquias, ornamentos, cones, signatureLinks)
+        return SrsNanokaData(personagens, reliquias, ornamentos, cones, signatureLinks, builds)
     }
 
     // -------------------- io -------------------- //
@@ -460,6 +468,7 @@ class SrsNanokaHarvester(
                 maos = piece(pieces, 1),
                 corpo = piece(pieces, 2),
                 pes = piece(pieces, 3),
+                gameId = entry.path("pageId").asText("").ifBlank { null },
             )
         }
 
@@ -471,6 +480,7 @@ class SrsNanokaHarvester(
                 efeito2Pecas = bonuses[2],
                 esfera = piece(pieces, 0),
                 corda = piece(pieces, 1),
+                gameId = entry.path("pageId").asText("").ifBlank { null },
             )
         }
 
@@ -514,5 +524,51 @@ class SrsNanokaHarvester(
                 descricao = null,
             )
         }
+
+        // ---------------- recommended builds (nanoka only) ---------------- //
+
+        /**
+         * One character's recommended [Build] from its nanoka detail JSON — the same lists
+         * [com.cyrene.knowledge.NanokaIngestionSource.buildDoc] renders: `set4_id_list` (cavern
+         * relics) / `set2_id_list` (planar ornaments) / `lightcones` are shared game ids kept raw
+         * for the FK join, each ordered best-first and capped to the table's 3 slots; `property_list`
+         * mains and `sub_affix_property_list` substats are labelled via [BuildAnalyzer.statPt]; the
+         * team is `teams[0].member_list` resolved to display names ([displayNames]), the character
+         * itself first. Null when there's nothing to recommend (no relics and no cones). Pure.
+         */
+        internal fun buildBuild(charGameId: String, nanDetail: JsonNode, displayNames: Map<String, String>): Build? {
+            val relics = nanDetail.path("relics")
+            val four = idList(relics.path("set4_id_list")).take(3)
+            val two = idList(relics.path("set2_id_list")).take(3)
+            val cones = idList(nanDetail.path("lightcones")).take(3)
+            if (four.isEmpty() && cones.isEmpty()) return null
+            val mains = buildMap {
+                relics.path("property_list").forEach { p ->
+                    val slot = p.path("relic_type").asText("")
+                    val stat = BuildAnalyzer.statPt(p.path("property_type").asText(""))
+                    if (slot.isNotBlank() && stat.isNotBlank()) putIfAbsent(slot, stat)
+                }
+            }
+            val subs = idList(relics.path("sub_affix_property_list"))
+                .map { BuildAnalyzer.statPt(it) }.filter { it.isNotBlank() }
+            val team = idList(nanDetail.path("teams").path(0).path("member_list")).mapNotNull { displayNames[it] }
+            return Build(
+                characterGameId = charGameId,
+                reliquiaGameIds = four,
+                ornamentoGameIds = two,
+                coneGameIds = cones,
+                mainStatCorpo = mains["BODY"],
+                mainStatPes = mains["FOOT"],
+                mainStatEsfera = mains["NECK"],
+                mainStatCorda = mains["OBJECT"],
+                substatusRecomendados = subs.takeIf { it.isNotEmpty() }?.joinToString(" > "),
+                equipeRecomendada = (listOfNotNull(displayNames[charGameId]) + team)
+                    .takeIf { it.isNotEmpty() }?.joinToString(", "),
+            )
+        }
+
+        /** Non-blank string ids of a JSON array (nanoka ids are ints; `asText` renders them), in order. */
+        private fun idList(node: JsonNode): List<String> =
+            children(node).map { it.asText("") }.filter { it.isNotBlank() }
     }
 }

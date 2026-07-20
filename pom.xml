@@ -19,6 +19,10 @@
     <properties>
         <!-- Bytecode target: jar runs on any JVM >= 21 (terminal has 21, IntelliJ 25) -->
         <java.version>21</java.version>
+        <!-- Two classes carry a main(): the bot and the SrsNanokaStandalone populate entrypoint.
+             Without this the boot plugin refuses to guess ("Unable to find a single main class").
+             The populate overrides it with -Dspring-boot.run.main-class=... -->
+        <start-class>com.cyrene.CyreneBotApplicationKt</start-class>
         <kotlin.version>2.3.0</kotlin.version>
         <spring-ai.version>1.0.0</spring-ai.version>
         <jda.version>5.5.1</jda.version>

@@ -1,27 +1,24 @@
 package com.cyrene.ai
 
 import com.cyrene.ai.OllamaAiService.Intent
-import com.cyrene.ai.OllamaAiService.VoicePath
 import com.cyrene.conversation.ConversationMessage
 import com.cyrene.conversation.MessageRole
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
 /**
- * Unit tests for the two pure routing decisions extracted from [OllamaAiService]:
- * [OllamaAiService.parseIntent] (intent-gate output → routing class) and
- * [OllamaAiService.selectVoicePath] (brain result + intent → voice rendering). These are
- * the heart of the brain/voice pipeline and the part most prone to silent regressions, so
- * they're tested in isolation without invoking a model.
+ * Unit tests for the pure parsing decisions extracted from [OllamaAiService] — the
+ * intent-gate output, the grounding verdict, and the fast-path heuristics in front of the
+ * gate. These decide what pipeline a message takes, so they're tested in isolation without
+ * invoking a model.
  */
 class OllamaAiServiceRoutingTest {
 
     @Test
-    fun `parseIntent maps the mod prefix to MODERATION, tolerating case and punctuation`() {
-        assertEquals(Intent.MODERATION, OllamaAiService.parseIntent("mod"))
-        assertEquals(Intent.MODERATION, OllamaAiService.parseIntent("MOD"))
-        assertEquals(Intent.MODERATION, OllamaAiService.parseIntent("  mod.  "))
-        assertEquals(Intent.MODERATION, OllamaAiService.parseIntent("moderation"))
+    fun `parseIntent maps a leftover mod verdict to CHAT, since moderation is commands-only now`() {
+        // A model still primed on the old three-way prompt must not land anywhere special.
+        assertEquals(Intent.CHAT, OllamaAiService.parseIntent("mod"))
+        assertEquals(Intent.CHAT, OllamaAiService.parseIntent("""{"intent": "mod"}"""))
     }
 
     @Test
@@ -29,6 +26,7 @@ class OllamaAiServiceRoutingTest {
         assertEquals(Intent.KNOWLEDGE, OllamaAiService.parseIntent("kb"))
         assertEquals(Intent.KNOWLEDGE, OllamaAiService.parseIntent("KB"))
         assertEquals(Intent.KNOWLEDGE, OllamaAiService.parseIntent("kb\n"))
+        assertEquals(Intent.KNOWLEDGE, OllamaAiService.parseIntent("  kb.  "))
     }
 
     @Test
@@ -39,22 +37,21 @@ class OllamaAiServiceRoutingTest {
 
     @Test
     fun `parseIntent reads the JSON form produced under format=json`() {
-        assertEquals(Intent.MODERATION, OllamaAiService.parseIntent("""{"intent": "mod"}"""))
         assertEquals(Intent.KNOWLEDGE, OllamaAiService.parseIntent("""{"intent":"kb"}"""))
         assertEquals(Intent.CHAT, OllamaAiService.parseIntent("""{"intent": "chat"}"""))
         // Malformed / truncated JSON degrades to the bare-word fallback → safe CHAT default.
-        assertEquals(Intent.CHAT, OllamaAiService.parseIntent("""{"intent": "mo"""))
-        assertEquals(Intent.CHAT, OllamaAiService.parseIntent("""{"outro_campo": "mod"}"""))
+        assertEquals(Intent.CHAT, OllamaAiService.parseIntent("""{"intent": "k"""))
+        assertEquals(Intent.CHAT, OllamaAiService.parseIntent("""{"outro_campo": "kb"}"""))
     }
 
     @Test
     fun `parseIntent defaults blank or unrecognised output to CHAT (the safe fallback)`() {
-        // CHAT can never misfire a moderation tool, so anything ambiguous must land here.
+        // A wrongly-chatty reply is a far cheaper miss than a confidently invented kit.
         assertEquals(Intent.CHAT, OllamaAiService.parseIntent(""))
         assertEquals(Intent.CHAT, OllamaAiService.parseIntent("   "))
         assertEquals(Intent.CHAT, OllamaAiService.parseIntent("banana"))
         // Must START with the keyword — a sentence merely containing it is not a match.
-        assertEquals(Intent.CHAT, OllamaAiService.parseIntent("acho que isso é moderation"))
+        assertEquals(Intent.CHAT, OllamaAiService.parseIntent("acho que isso é kb"))
     }
 
     @Test
@@ -90,44 +87,6 @@ class OllamaAiServiceRoutingTest {
         // Malformed JSON or a missing field falls back on the raw text → fail-open (pass).
         assertEquals(true, OllamaAiService.parseVerdict("""{"veredito": "na"""))
         assertEquals(true, OllamaAiService.parseVerdict("""{"outro": "nao"}"""))
-    }
-
-    @Test
-    fun `selectVoicePath sends a real knowledge result to the full-detail KNOWLEDGE path`() {
-        assertEquals(
-            VoicePath.KNOWLEDGE,
-            OllamaAiService.selectVoicePath("Acheron é do elemento Raio, caminho Nihility.", Intent.KNOWLEDGE),
-        )
-    }
-
-    @Test
-    fun `selectVoicePath sends a real moderation result to the terse FOCUSED path`() {
-        assertEquals(
-            VoicePath.FOCUSED,
-            OllamaAiService.selectVoicePath("Timeout de 10 minutos aplicado em <@123>.", Intent.MODERATION),
-        )
-    }
-
-    @Test
-    fun `selectVoicePath treats sentinels and blank output as no-action under every intent`() {
-        for (intent in Intent.entries) {
-            assertEquals(VoicePath.CONVERSATIONAL, OllamaAiService.selectVoicePath("Sem ação necessária.", intent))
-            assertEquals(VoicePath.CONVERSATIONAL, OllamaAiService.selectVoicePath("Pronto.", intent))
-            assertEquals(VoicePath.CONVERSATIONAL, OllamaAiService.selectVoicePath("   ", intent))
-        }
-    }
-
-    @Test
-    fun `selectVoicePath sentinel matching ignores case and surrounding whitespace`() {
-        assertEquals(
-            VoicePath.CONVERSATIONAL,
-            OllamaAiService.selectVoicePath("  sem AÇÃO necessária.  ", Intent.KNOWLEDGE),
-        )
-    }
-
-    @Test
-    fun `selectVoicePath narrates a real result tersely when the intent is not KNOWLEDGE`() {
-        assertEquals(VoicePath.FOCUSED, OllamaAiService.selectVoicePath("Algum resultado real.", Intent.CHAT))
     }
 
     @Test
@@ -178,11 +137,12 @@ class OllamaAiServiceRoutingTest {
     }
 
     @Test
-    fun `gazetteerFastPath defers to the LLM gate on any moderation cue`() {
+    fun `gazetteerFastPath defers a server-flavoured message with no mechanics cue`() {
         val knowsAcheron = { s: String -> s.contains("acheron", ignoreCase = true) }
-        // Mod verb present → null, even with a character name and a question mark.
+        // Moderation is slash-commands only, so these carry no special routing weight — but
+        // they still have no mechanics cue, so they defer to the LLM gate rather than being
+        // fast-pathed into a kit dump.
         assertEquals(null, OllamaAiService.gazetteerFastPath("muta quem falou mal da acheron?", knowsAcheron))
-        // A <@mention> smells like a target, not a kb question.
         assertEquals(null, OllamaAiService.gazetteerFastPath("<@123> perguntou da acheron?", knowsAcheron))
         assertEquals(null, OllamaAiService.gazetteerFastPath("da o cargo acheron pro pessoal?", knowsAcheron))
     }

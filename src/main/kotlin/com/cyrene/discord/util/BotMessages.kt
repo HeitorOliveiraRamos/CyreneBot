@@ -27,6 +27,23 @@ object BotMessages {
     const val PAGES_EXPIRED =
         "Essa resposta já é antiga e eu perdi as outras páginas dela 😔 Me pergunta de novo que eu refaço!"
 
+    /** A slash command was used in a guild channel outside the configured allow-list. */
+    const val CHANNEL_NOT_ALLOWED =
+        "Eu não estou ativa neste canal 😅 Me chama num dos canais liberados pra mim!"
+
+    /** A moderation command needs a server; it was run in a DM. */
+    const val GUILD_ONLY =
+        "Esse comando só funciona dentro de um servidor 💜"
+
+    /**
+     * Someone asked for a moderation action in conversation. The bot has no such ability
+     * anymore — it's slash commands only — so point at the one that does it instead of
+     * letting the persona improvise a refusal (or, worse, claim it did the thing).
+     */
+    fun useCommand(command: String): String =
+        "Isso eu não faço no papo, amor — é `/$command` que resolve 😌\n" +
+            "-# Tudo que mexe no servidor virou comando. Digita `/` que eles aparecem."
+
     /** A reply pipeline failed unexpectedly. */
     const val ERROR =
         "Ai, me embolei toda aqui e não consegui responder agora 😔 Tenta de novo daqui a pouco?"
@@ -63,7 +80,6 @@ object BotMessages {
      */
     const val STATUS_KNOWLEDGE = "🔎 Deixa eu procurar na minha base de conhecimento…"
     const val STATUS_WEB = "🌐 Não tinha tudo na base, pesquisando na internet…"
-    const val STATUS_MODERATION = "🛠️ Deixa comigo, já estou cuidando disso…"
     const val STATUS_WRITING = "✍️ Só um instante, organizando a resposta…"
 
     /** The requester pressed Cancelar on a live status message. */

@@ -7,11 +7,15 @@ import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Component
 
 /**
- * One-shot populate of the V17 SRS+nanoka tables from [SrsNanokaHarvester]. Same trigger shape as
- * [com.cyrene.knowledge.HsrKnowledgeIngestion]: a [CommandLineRunner] gated by
- * `bot.knowledge.populate-srs-nanoka` (env `POPULATE_SRS_NANOKA=true`) that returns immediately when
- * the flag is off, so normal boots are untouched. Flyway applies V17 on the same boot, so the tables
- * exist before this writes.
+ * Populates the V17 SRS+nanoka tables from [SrsNanokaHarvester] — the single upstream fetch behind
+ * both the deterministic answer services and the vector store.
+ *
+ * Two triggers, same [populate] body:
+ *  - automatic, from [com.cyrene.knowledge.KbFreshnessCheck] when nanoka starts serving a newer
+ *    data version (it then reindexes the store from these tables) — the hands-off path;
+ *  - manual, as a [CommandLineRunner] gated by `bot.knowledge.populate-srs-nanoka`
+ *    (env `POPULATE_SRS_NANOKA=true`), which returns immediately when the flag is off so normal
+ *    boots are untouched. Flyway applies V17 on the same boot, so the tables exist before this writes.
  *
  * Every row is an idempotent upsert on its natural key (`character_id` / `nome`), so re-runs are
  * safe. Character and cone PKs are captured from `RETURNING` and joined in memory to set each
@@ -42,8 +46,11 @@ class SrsNanokaPopulator(
 
         val charPk = HashMap<String, Int>()
         data.personagens.forEach { p -> upsertPersonagem(p)?.let { charPk[p.characterId] = it } }
-        data.reliquias.forEach(::upsertReliquia)
-        data.ornamentos.forEach(::upsertOrnamento)
+        // gameId -> PK, so a recommended build's set/cone ids resolve to FKs (same as the sig link).
+        val relicPk = HashMap<String, Int>()
+        data.reliquias.forEach { r -> upsertReliquia(r)?.let { pk -> r.gameId?.let { relicPk[it] = pk } } }
+        val ornamentPk = HashMap<String, Int>()
+        data.ornamentos.forEach { o -> upsertOrnamento(o)?.let { pk -> o.gameId?.let { ornamentPk[it] = pk } } }
         val conePk = HashMap<String, Int>()
         data.cones.forEach { c -> upsertCone(c)?.let { conePk[c.coneGameId] = it } }
 
@@ -55,10 +62,45 @@ class SrsNanokaPopulator(
             linked++
         }
 
+        val builds = insertBuilds(data.builds, charPk, relicPk, ornamentPk, conePk)
+
         log.info(
-            "srs_nanoka: gravados {} personagens, {} relíquias, {} ornamentos, {} cones ({} assinaturas)",
-            charPk.size, data.reliquias.size, data.ornamentos.size, conePk.size, linked,
+            "srs_nanoka: gravados {} personagens, {} relíquias, {} ornamentos, {} cones ({} assinaturas, {} builds)",
+            charPk.size, data.reliquias.size, data.ornamentos.size, conePk.size, linked, builds,
         )
+    }
+
+    /**
+     * Rebuilds the `builds` table wholesale (it's a derived leaf: no children, one row per
+     * character). Cheaper and simpler than a natural-key upsert — the recommendations are
+     * fully regenerated each harvest. FKs resolved via the in-memory PK maps; a build for a
+     * character/item that didn't persist is skipped rather than failing the FK.
+     */
+    // ponytail: DELETE + insert; add UNIQUE(id_personagem_hsr) + ON CONFLICT if partial writes ever matter.
+    private fun insertBuilds(
+        builds: List<Build>,
+        charPk: Map<String, Int>,
+        relicPk: Map<String, Int>,
+        ornamentPk: Map<String, Int>,
+        conePk: Map<String, Int>,
+    ): Int {
+        jdbc.update("DELETE FROM builds")
+        var written = 0
+        builds.forEach { b ->
+            val pp = charPk[b.characterGameId] ?: return@forEach
+            fun fk(ids: List<String>, i: Int, map: Map<String, Int>): Int? = ids.getOrNull(i)?.let { map[it] }
+            jdbc.update(
+                BUILD_SQL,
+                pp,
+                fk(b.reliquiaGameIds, 0, relicPk), fk(b.reliquiaGameIds, 1, relicPk), fk(b.reliquiaGameIds, 2, relicPk),
+                fk(b.ornamentoGameIds, 0, ornamentPk), fk(b.ornamentoGameIds, 1, ornamentPk), fk(b.ornamentoGameIds, 2, ornamentPk),
+                fk(b.coneGameIds, 0, conePk), fk(b.coneGameIds, 1, conePk), fk(b.coneGameIds, 2, conePk),
+                b.mainStatCorpo, b.mainStatPes, b.mainStatEsfera, b.mainStatCorda,
+                b.substatusRecomendados, b.equipeRecomendada,
+            )
+            written++
+        }
+        return written
     }
 
     // -------------------- upserts -------------------- //
@@ -83,15 +125,17 @@ class SrsNanokaPopulator(
         return jdbc.queryForObject(PERSONAGEM_SQL, Int::class.java, *params.toTypedArray())
     }
 
-    private fun upsertReliquia(r: Reliquia) = jdbc.update(
-        RELIQUIA_SQL,
+    /** Upserts one cavern set on `nome`; returns its `id_reliquia` for the builds FK map. */
+    private fun upsertReliquia(r: Reliquia): Int? = jdbc.queryForObject(
+        RELIQUIA_SQL, Int::class.java,
         r.nome, r.efeito2Pecas, r.efeito4Pecas,
         r.cabeca.nome, r.cabeca.descricao, r.maos.nome, r.maos.descricao,
         r.corpo.nome, r.corpo.descricao, r.pes.nome, r.pes.descricao,
     )
 
-    private fun upsertOrnamento(o: OrnamentoPlano) = jdbc.update(
-        ORNAMENTO_SQL,
+    /** Upserts one planar set on `nome`; returns its `id_ornamento_plano` for the builds FK map. */
+    private fun upsertOrnamento(o: OrnamentoPlano): Int? = jdbc.queryForObject(
+        ORNAMENTO_SQL, Int::class.java,
         o.nome, o.efeito2Pecas, o.esfera.nome, o.esfera.descricao, o.corda.nome, o.corda.descricao,
     )
 
@@ -132,14 +176,23 @@ class SrsNanokaPopulator(
             listOf("nome", "efeito_2_pecas", "efeito_4_pecas",
                 "cabeca_nome", "cabeca_descricao", "maos_nome", "maos_descricao",
                 "corpo_nome", "corpo_descricao", "pes_nome", "pes_descricao"),
-            conflict = "nome",
+            conflict = "nome", returning = "id_reliquia",
         )
 
         private val ORNAMENTO_SQL = buildUpsert(
             "ornamentos_planos",
             listOf("nome", "efeito_2_pecas", "esfera_nome", "esfera_descricao", "corda_nome", "corda_descricao"),
-            conflict = "nome",
+            conflict = "nome", returning = "id_ornamento_plano",
         )
+
+        /** Plain insert into the derived `builds` leaf (wiped first each run — see [insertBuilds]). */
+        private val BUILD_SQL =
+            "INSERT INTO builds (id_personagem_hsr, " +
+                "id_reliquia1, id_reliquia2, id_reliquia3, " +
+                "id_ornamento_plano1, id_ornamento_plano2, id_ornamento_plano3, " +
+                "id_cone_de_luz1, id_cone_de_luz2, id_cone_de_luz3, " +
+                "main_stat_corpo, main_stat_pes, main_stat_esfera, main_stat_corda, " +
+                "substatus_recomendados, equipe_recomendada) VALUES (${(1..16).joinToString(", ") { "?" }})"
 
         private val CONE_SQL = buildUpsert(
             "cones_de_luz",
