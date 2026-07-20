@@ -1,6 +1,13 @@
 package com.cyrene.ai
 
 import com.cyrene.ai.OllamaAiService.Intent
+import com.cyrene.hsr.HsrCharacterService
+import com.cyrene.knowledge.Facet
+import com.cyrene.knowledge.GameKnowledgeTools
+import com.cyrene.knowledge.PlanAnswerService
+import com.cyrene.knowledge.Project
+import com.cyrene.knowledge.QueryPlan
+import com.cyrene.knowledge.RosterAnswerService.Entity
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable
 import java.net.URI
@@ -37,7 +44,7 @@ class LlmEvalTest {
     private val mapper = ObjectMapper()
     private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build()
     private val baseUrl = System.getenv("OLLAMA_BASE_URL") ?: "http://localhost:11434"
-    private val model = System.getenv("EVAL_MODEL") ?: System.getenv("MODEL_NAME") ?: "llama3.1"
+    private val model = System.getenv("EVAL_MODEL") ?: System.getenv("MODEL_NAME") ?: "gemma4:12b-it-q8_0"
 
     // -------------------- intent gate -------------------- //
 
@@ -204,6 +211,64 @@ class LlmEvalTest {
         assertTrue(accuracy >= 0.75, "condense accuracy $accuracy < 0.75")
     }
 
+    // -------------------- query planner -------------------- //
+
+    private val plannerFactions = listOf("Expresso Astral", "Vigia da Galáxia", "O Luofu do Xianzhou")
+
+    /** Identity gazetteer: any non-blank name "resolves" to its normalized form, so the eval
+     *  checks the MODEL's output shape without needing the real character table. */
+    private val plannerResolve: (String) -> String? =
+        { HsrCharacterService.normalize(it).ifBlank { null } }
+
+    private val allBuildLabels = GameKnowledgeTools.BUILD_LINE_LABELS.toSet()
+
+    /** (question, the validated plan the model's JSON must produce — null = must refuse). */
+    private val plannerCases: List<Pair<String, QueryPlan?>> = listOf(
+        // The three shapes the deterministic parsers exist for, in planner form.
+        "me gera uma lista com 5 personagens de cada elemento" to
+            QueryPlan(Entity.PERSONAGEM, groupBy = Facet.ELEMENTO, limit = 5),
+        "me da o efeito do terceiro melhor cone pro Phainon" to
+            QueryPlan(Entity.CONE, characterIds = listOf("phainon"), ordinal = 3, project = Project.EFEITO),
+        "me da a build de um personagem de gelo" to
+            QueryPlan(
+                Entity.PERSONAGEM, elemento = "Gelo", pick = true,
+                labels = allBuildLabels, project = Project.BUILD,
+            ),
+        // Free phrasings the token parsers can't anticipate.
+        "quantos cones 5 estrelas existem de cada caminho?" to
+            QueryPlan(Entity.CONE, raridade = 5, groupBy = Facet.CAMINHO, project = Project.COUNT),
+        "lista pra mim os personagens 4 estrelas da caça" to
+            QueryPlan(Entity.PERSONAGEM, caminho = "A Caça", raridade = 4),
+        "escolhe um personagem qualquer da abundância e me mostra o time dele" to
+            QueryPlan(
+                Entity.PERSONAGEM, caminho = "A Abundância", pick = true,
+                labels = allBuildLabels, project = Project.BUILD,
+            ),
+        "qual a segunda melhor relíquia pra Kafka?" to
+            QueryPlan(Entity.RELIQUIA, characterIds = listOf("kafka"), ordinal = 2, project = Project.EFEITO),
+        "quantos personagens de fogo tem no jogo?" to
+            QueryPlan(Entity.PERSONAGEM, elemento = "Fogo", project = Project.COUNT),
+        "quantos personagens tem na facção Expresso Astral?" to
+            QueryPlan(Entity.PERSONAGEM, faccao = "Expresso Astral", project = Project.COUNT),
+        // Must-refuse: single-entity, kit, lore and chat questions are other paths' jobs.
+        "quem é a acheron?" to null,
+        "qual o kit completo da robin?" to null,
+        "o que faz o eidolon 2 da firefly?" to null,
+        "me conta uma história de terror" to null,
+        "muta o <@123> aí por favor" to null,
+    )
+
+    @Test
+    fun `query planner accuracy`() {
+        val results = plannerCases.map { (question, expected) ->
+            val raw = ask(OllamaAiService.PLANNER_INSTRUCTIONS, "Pergunta: $question\nPlano:", numPredict = 192)
+            val got = PlanAnswerService.parseLlmPlan(raw, plannerFactions, plannerResolve)
+            Triple("$question → ${raw.trim().take(120)}", expected, got)
+        }
+        val accuracy = report("QUERY PLANNER [$model]", results)
+        assertTrue(accuracy >= 0.8, "query planner accuracy $accuracy < 0.8")
+    }
+
     // -------------------- plumbing -------------------- //
 
     /**
@@ -214,6 +279,9 @@ class LlmEvalTest {
         val body = mapper.createObjectNode().apply {
             put("model", model)
             put("stream", false)
+            // Production disables thinking on every constrained pass (see OllamaAiService);
+            // without this a hybrid-thinking model reasons past the tiny num_predict budget.
+            put("think", false)
             put("format", "json")
             putArray("messages").apply {
                 addObject().put("role", "system").put("content", system)

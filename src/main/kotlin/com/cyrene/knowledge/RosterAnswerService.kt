@@ -37,8 +37,12 @@ class RosterAnswerService(
         val roster = characters.all()
         val ask = wantedRoster(query, roster.mapNotNull { it.faccao }) ?: return null
         log.debug("Deterministic roster answer for '{}' (ask {})", query, ask)
-        return if (ask.entity == Entity.PERSONAGEM) characterAnswer(ask) else itemAnswer(ask)
+        return answer(ask)
     }
+
+    /** Renders an already-parsed ask — the seam [PlanAnswerService] executes flat plans through. */
+    internal fun answer(ask: RosterAsk): String? =
+        if (ask.entity == Entity.PERSONAGEM) characterAnswer(ask) else itemAnswer(ask)
 
     private fun characterAnswer(ask: RosterAsk): String? {
         val matched = filter(characters.all(), ask)
@@ -114,8 +118,9 @@ class RosterAnswerService(
         /** A count answer also names the entries when there are at most this many. */
         internal const val COUNT_WITH_NAMES = 15
 
-        /** Words that make this a question about a table rather than about one entity. */
-        private val ENTITY_CUES: Map<String, Entity> = listOf(
+        /** Words that make this a question about a table rather than about one entity.
+         *  Internal so [PlanAnswerService] parses the same entity vocabulary. */
+        internal val ENTITY_CUES: Map<String, Entity> = listOf(
             Entity.PERSONAGEM to "personagem personagens chars characters unidade unidades " +
                 "membro membros integrante integrantes",
             Entity.RELIQUIA to "reliquia reliquias relic relics",
@@ -131,8 +136,8 @@ class RosterAnswerService(
          */
         private val SERVER_AMBIGUOUS = setOf("membro", "membros", "integrante", "integrantes")
 
-        private val COUNT_WORDS = setOf("quantos", "quantas", "total")
-        private val RANDOM_WORDS = setOf("aleatorio", "aleatoria", "aleatorios", "aleatorias", "random")
+        internal val COUNT_WORDS = setOf("quantos", "quantas", "total")
+        internal val RANDOM_WORDS = setOf("aleatorio", "aleatoria", "aleatorios", "aleatorias", "random")
 
         /**
          * "5 estrelas" / "4*" / "3 star" — parsed (and removed) before the limit scan.
@@ -140,10 +145,10 @@ class RosterAnswerService(
          * (25 of the 169), and "5 cones de luz da destruição 3 estrelas" silently ignored the
          * rarity while it was capped at [45].
          */
-        private val RARITY = Regex("\\b([3-5])\\s*(?:estrelas?|stars?|\\*)")
+        internal val RARITY = Regex("\\b([3-5])\\s*(?:estrelas?|stars?|\\*)")
 
         /** Any remaining standalone 1..50 is how many to show. */
-        private val NUMBER = Regex("\\b([1-9]\\d?)\\b")
+        internal val NUMBER = Regex("\\b([1-9]\\d?)\\b")
 
         /**
          * Parses a table question, or null when it isn't one. Requires BOTH an entity word and at

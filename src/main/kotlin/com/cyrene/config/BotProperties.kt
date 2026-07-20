@@ -96,7 +96,7 @@ data class BotProperties(
     /**
      * Ollama inference tuning applied to every chat/tool call. These map directly to the
      * Ollama options of the same name and override Spring AI's defaults because
-     * [com.cyrene.ai.OllamaAiService] builds per-prompt [org.springframework.ai.ollama.api.OllamaOptions].
+     * [com.cyrene.ai.OllamaAiService] builds per-prompt [org.springframework.ai.ollama.api.OllamaChatOptions].
      *
      *  - [numCtx]: context window. Default 16384 is sized for the knowledge path, whose
      *    worst case feeds ~2×18000 chars of fetched web text (see [Knowledge.webFetchCharLimit])

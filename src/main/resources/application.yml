@@ -23,23 +23,17 @@ spring:
       base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
       chat:
         options:
-          # NOTE: For Discord tool calling to work, MODEL_NAME must be a tool-capable
-          # Ollama model. Verified options include: llama3.1, llama3.2, qwen2.5,
-          # qwen2.5-coder, mistral-nemo, mistral-small, granite3-dense.
-          # Plain `llama3` does NOT support tools and will cause tool-aware chats to
-          # fall back to text-only behavior.
-          model: ${MODEL_NAME:llama3.1}
+          model: ${MODEL_NAME:gemma4:12b-it-q8_0}
       # Embedding model for the RAG knowledge base. Pull it once: `ollama pull nomic-embed-text`.
       # nomic-embed-text outputs 768-dim vectors — this MUST match pgvector.dimensions below.
       # If you swap to a different embed model (e.g. mxbai-embed-large = 1024), update both.
       embedding:
         options:
           model: ${EMBED_MODEL_NAME:nomic-embed-text}
-          # NO keep-alive here on purpose: Spring AI 1.0.0 sends the embedding keep_alive as
-          # an ISO-8601 Duration ("PT30M"), which Ollama's Go parser rejects with 400
-          # "invalid duration" — every embed call (reindex AND lookupHsr) would die. The
-          # chat path serializes it as a plain string, so bot.performance.keep-alive is fine.
-          # Cost: the embed model reloads after Ollama's 5m default idle — ~1s, acceptable.
+          # Safe since Spring AI 1.1.x: keep_alive now serializes as a plain Ollama string
+          # ("30m"). 1.0.0 sent it as an ISO-8601 Duration ("PT30M"), which Ollama's Go
+          # parser rejected with 400 — that is why this line was absent before the upgrade.
+          keep-alive: ${OLLAMA_EMBED_KEEP_ALIVE:30m}
     vectorstore:
       pgvector:
         # Spring AI creates the `vector_store` table + HNSW index on first start.
@@ -52,21 +46,23 @@ spring:
 bot:
   token: ${BOT_TOKEN}
   personality-file: ${BOT_PERSONALITY_FILE:classpath:prompts/cyrene-personality.md}
+  # The four model slots default to ONE multimodal model (vision+tools, thinking
+  # disabled per call) so a single runner serves every pass — on a 24GB host that is
+  # the difference between one hot 13GB model and two/three swapping ones. They stay
+  # separate env vars so a split setup (e.g. GAIA voice + qwen brain) is still one
+  # .env change away.
   # Default Ollama model used by legacy single-pass paths (e.g. /contexto-do-canal).
-  # MUST be tool-capable (llama3.1, llama3.2, qwen2.5, mistral-nemo, etc.) —
-  # plain `llama3` does NOT support tools.
-  model-name: ${MODEL_NAME:llama3.1}
-  # Brain pass: decides tool calls and produces a factual, neutral description of
-  # what was done. MUST be tool-capable.
-  brain-model-name: ${BRAIN_MODEL_NAME:llama3.1}
-  # Voice pass: rewrites the brain's output as Cyrene in persona. No tool callbacks
-  # are attached to this pass.
-  voice-model-name: ${VOICE_MODEL_NAME:llama3.1}
+  model-name: ${MODEL_NAME:gemma4:12b-it-q8_0}
+  # Brain pass: the constrained classification-shaped calls (intent gate, condenser,
+  # grounding judge, greeting line) and the knowledge retelling.
+  brain-model-name: ${BRAIN_MODEL_NAME:gemma4:12b-it-q8_0}
+  # Voice pass: persona chat replies.
+  voice-model-name: ${VOICE_MODEL_NAME:gemma4:12b-it-q8_0}
   # Vision pass: extracts any image attachment's content as text before the normal
   # pipeline (works for general images, not just HSR — HSR screenshots just get extra
   # transcription care in the prompt). Needs a vision-capable Ollama model already
   # pulled. Set VISION_MODEL_NAME= (blank) to disable and ignore images as before.
-  vision-model-name: ${VISION_MODEL_NAME:qwen2.5vl}
+  vision-model-name: ${VISION_MODEL_NAME:gemma4:12b-it-q8_0}
   # Ollama inference tuning. These are applied at every call site by OllamaAiService
   # because per-prompt OllamaOptions replace Spring AI's chat.options defaults.
   # num-ctx default (16384) is sized for the knowledge path's web-fetch budget (see

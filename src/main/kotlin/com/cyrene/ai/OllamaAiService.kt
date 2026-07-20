@@ -12,6 +12,8 @@ import com.cyrene.knowledge.ItemAnswerService
 import com.cyrene.knowledge.KitAnswerService
 import com.cyrene.knowledge.KnowledgeGrounder
 import com.cyrene.knowledge.LoreAnswerService
+import com.cyrene.knowledge.PlanAnswerService
+import com.cyrene.knowledge.QueryPlan
 import com.cyrene.knowledge.RosterAnswerService
 import org.slf4j.LoggerFactory
 import org.springframework.ai.chat.messages.Message
@@ -19,7 +21,7 @@ import org.springframework.ai.chat.messages.SystemMessage
 import org.springframework.ai.chat.messages.UserMessage
 import org.springframework.ai.chat.prompt.Prompt
 import org.springframework.ai.ollama.OllamaChatModel
-import org.springframework.ai.ollama.api.OllamaOptions
+import org.springframework.ai.ollama.api.OllamaChatOptions
 import org.springframework.stereotype.Service
 import java.time.LocalDate
 
@@ -59,6 +61,7 @@ class OllamaAiService(
     private val itemAnswers: ItemAnswerService,
     private val loreAnswers: LoreAnswerService,
     private val rosterAnswers: RosterAnswerService,
+    private val planAnswers: PlanAnswerService,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -147,6 +150,14 @@ class OllamaAiService(
         // model's only job is the one-line greeting on top ([greetingLine], user request
         // 2026-07-16 — canned fallback if it fails). Sits BEFORE the cache so stale
         // model-written answers can't mask it; the body is not cached itself (~ms render).
+        //
+        // Plan answers run FIRST: an ordinal ask ("terceiro melhor cone pro Phainon") would
+        // otherwise be swallowed by the build path's full ranked-list render. The parser only
+        // fires on the group/ordinal/pick shapes, so nothing the other services answer today
+        // ever reaches a different template.
+        planAnswers.answer(searchQuery)?.let {
+            return greeted(it, question, userName, "plan_render", progress)
+        }
         buildAnswers.answer(searchQuery)?.let {
             return greeted(it, question, userName, "build_render", progress)
         }
@@ -181,6 +192,21 @@ class OllamaAiService(
         }
 
         progress(BotMessages.STATUS_KNOWLEDGE)
+
+        // LLM planner tier: for table-shaped questions the deterministic parsers didn't
+        // recognize, one brain-model call emits a [QueryPlan] as JSON (same IR, same
+        // executor). Strictly validated — an unresolvable field rejects the whole plan —
+        // and fail-open: null just continues into retrieval, so this tier can only ever
+        // ADD answers. Gated by [PlanAnswerService.looksPlannable] so single-entity
+        // questions ("quem é a Acheron?") never pay the planner round-trip.
+        if (PlanAnswerService.looksPlannable(searchQuery)) {
+            planFromLlm(searchQuery)?.let { plan ->
+                planAnswers.execute(plan)?.let {
+                    return greeted(it, question, userName, "plan_llm_render", progress)
+                }
+            }
+        }
+
         val grounding = metrics.timePass("knowledge_retrieve") {
             knowledgeGrounder.ground(searchQuery) { progress(BotMessages.STATUS_WEB) }
         }
@@ -313,6 +339,33 @@ class OllamaAiService(
     }
 
     /**
+     * LLM planner: the brain model converts a table-shaped question into a [QueryPlan] JSON
+     * ([PLANNER_INSTRUCTIONS]), validated by [PlanAnswerService.parseLlmPlan] against the live
+     * taxonomy/gazetteer/faction names. Null on ANY failure — parse, validation, exception —
+     * so the worst case is exactly today's retrieval path, never a wrong filter.
+     */
+    private fun planFromLlm(question: String): QueryPlan? {
+        val messages = listOf(
+            SystemMessage(PLANNER_INSTRUCTIONS),
+            UserMessage("Pergunta: $question\nPlano:"),
+        )
+        return try {
+            val raw = metrics.timePass("knowledge_plan") {
+                chatModel.call(Prompt(messages, plannerOptions())).result.output.text
+            } ?: ""
+            val plan = PlanAnswerService.parseLlmPlan(
+                raw,
+                characters.all().mapNotNull { it.faccao },
+            ) { name -> characters.resolveId(name) }
+            if (log.isDebugEnabled) log.debug("LLM plan raw='{}' → {}", raw.trim(), plan)
+            plan
+        } catch (e: Exception) {
+            log.warn("LLM planner failed for '{}'; falling through to retrieval", question, e)
+            null
+        }
+    }
+
+    /**
      * Grounding judge (#5): does every factual claim in [answer] trace back to [context]? Tiny token
      * budget, temp 0 — it only emits "sim"/"nao". Returns true on any failure (parse error, exception)
      * so the worst case is a missed catch, never a wrongly-suppressed good answer.
@@ -364,7 +417,7 @@ class OllamaAiService(
         gazetteerFastPath(
             lastUser,
             mentionsCharacter = { characters.findInText(it).isNotEmpty() },
-            isTableQuestion = { rosterAnswers.isTableQuestion(it) },
+            isTableQuestion = { rosterAnswers.isTableQuestion(it) || planAnswers.isPlanQuestion(it) },
         )?.let {
             metrics.count("cyrene.llm.fastpath", "result", "gazetteer")
             if (log.isDebugEnabled) log.debug("Gazetteer fast-path (no LLM) → {}", it)
@@ -555,33 +608,25 @@ class OllamaAiService(
     }
 
     /**
-     * Per-pass [OllamaOptions]. Spring AI replaces yaml defaults with whatever is set
+     * Per-pass [OllamaChatOptions]. Spring AI replaces yaml defaults with whatever is set
      * here on a per-call basis, so the tuning knobs must be applied at every call site
      * (which is why they live in dedicated helpers rather than being scattered).
      *
      * Each pass has its own sampling profile:
-     *  - [brainOptions]: tight (low temp + topP) so tool calls aren't hallucinated.
      *  - [intentGateOptions]: deterministic (temp=0) + tiny token budget — single-word
      *    classification.
      *  - [voiceOptions]: warmer for natural persona prose.
      *  - [legacyOptions]: untuned for the single-pass `/contexto-do-canal` summarizer.
+     *
+     * Every pass runs [OllamaChatOptions.Builder.disableThinking]: hybrid-thinking models
+     * (gemma4, qwen3.x) auto-enable thinking when the flag is absent, which burns the
+     * numPredict budget on reasoning (a truncation risk for the 512-token voice pass and
+     * a guaranteed break for the JSON-constrained one-word passes) and adds seconds of
+     * latency per reply. Non-thinking models ignore the flag, so it is safe unconditionally.
      */
-    private fun brainOptions(): OllamaOptions =
-        OllamaOptions.builder()
-            .model(properties.brainModelName)
-            .temperature(properties.performance.brainTemperature)
-            .topP(properties.performance.brainTopP)
-            .numCtx(properties.performance.numCtx)
-            // Knowledge budget, not the 512 chat default: an HSR extraction (a full kit, or
-            // a fetched web page distilled into one) needs room. It's only a ceiling —
-            // moderation replies still stop after a sentence, so this never slows them down.
-            .numPredict(properties.performance.knowledgeNumPredict)
-            .numThread(properties.performance.numThread)
-            .keepAlive(properties.performance.keepAlive)
-            .build()
-
-    private fun voiceOptions(): OllamaOptions =
-        OllamaOptions.builder()
+    private fun voiceOptions(): OllamaChatOptions =
+        OllamaChatOptions.builder()
+            .disableThinking()
             .model(properties.voiceModelName)
             .temperature(properties.performance.voiceTemperature)
             .numCtx(properties.performance.numCtx)
@@ -592,8 +637,9 @@ class OllamaAiService(
 
     /** Greeting-line options: the BRAIN model (hot + obedient — see [greetingLine])
      *  with a one-line token budget. */
-    private fun greetingOptions(): OllamaOptions =
-        OllamaOptions.builder()
+    private fun greetingOptions(): OllamaChatOptions =
+        OllamaChatOptions.builder()
+            .disableThinking()
             .model(properties.brainModelName)
             .temperature(properties.performance.voiceTemperature)
             .numCtx(properties.performance.numCtx)
@@ -614,8 +660,9 @@ class OllamaAiService(
      * facts, so favour fidelity over flourish, while still honouring a user who
      * configured an even lower voice temp.
      */
-    private fun knowledgeVoiceOptions(): OllamaOptions =
-        OllamaOptions.builder()
+    private fun knowledgeVoiceOptions(): OllamaChatOptions =
+        OllamaChatOptions.builder()
+            .disableThinking()
             .model(properties.brainModelName)
             .temperature(properties.performance.voiceTemperature.coerceAtMost(0.6))
             .numCtx(properties.performance.numCtx)
@@ -632,8 +679,9 @@ class OllamaAiService(
      * runner and force a model reload on every gate→voice alternation — far more expensive
      * than the KV memory a smaller window would save.
      */
-    private fun intentGateOptions(): OllamaOptions =
-        OllamaOptions.builder()
+    private fun intentGateOptions(): OllamaChatOptions =
+        OllamaChatOptions.builder()
+            .disableThinking()
             .model(properties.brainModelName)
             .temperature(0.0)
             .format("json")
@@ -648,8 +696,9 @@ class OllamaAiService(
      * full window — the judge must read the whole source [context] (up to the web-fetch
      * budget) alongside the answer to check grounding.
      */
-    private fun verifyOptions(): OllamaOptions =
-        OllamaOptions.builder()
+    private fun verifyOptions(): OllamaChatOptions =
+        OllamaChatOptions.builder()
+            .disableThinking()
             .model(properties.brainModelName)
             .temperature(0.0)
             .format("json")
@@ -664,8 +713,9 @@ class OllamaAiService(
      * output is a single rewritten question. Full numCtx for the same runner-reuse reason
      * as [intentGateOptions].
      */
-    private fun condenseOptions(): OllamaOptions =
-        OllamaOptions.builder()
+    private fun condenseOptions(): OllamaChatOptions =
+        OllamaChatOptions.builder()
+            .disableThinking()
             .model(properties.brainModelName)
             .temperature(0.0)
             .format("json")
@@ -675,8 +725,26 @@ class OllamaAiService(
             .keepAlive(properties.performance.keepAlive)
             .build()
 
-    private fun legacyOptions(): OllamaOptions =
-        OllamaOptions.builder()
+    /**
+     * Planner options: brain model, deterministic, JSON-constrained, small budget — the
+     * output is one flat JSON object. Full numCtx for the same runner-reuse reason as
+     * [intentGateOptions].
+     */
+    private fun plannerOptions(): OllamaChatOptions =
+        OllamaChatOptions.builder()
+            .disableThinking()
+            .model(properties.brainModelName)
+            .temperature(0.0)
+            .format("json")
+            .numCtx(properties.performance.numCtx)
+            .numPredict(192)
+            .numThread(properties.performance.numThread)
+            .keepAlive(properties.performance.keepAlive)
+            .build()
+
+    private fun legacyOptions(): OllamaChatOptions =
+        OllamaChatOptions.builder()
+            .disableThinking()
             .model(properties.modelName)
             .numCtx(properties.performance.numCtx)
             .numPredict(properties.performance.numPredict)
@@ -1020,6 +1088,62 @@ class OllamaAiService(
             - "muta o <@123> aí" → {"intent": "chat"}
 
             Não explique. Não comente. APENAS o JSON: {"intent": "kb"|"chat"}.
+        """.trimIndent()
+
+        /**
+         * LLM planner prompt — the catalog of the V17 tables as a CLOSED-value JSON schema.
+         * The model never writes SQL and never answers; it only fills this template, and
+         * [PlanAnswerService.parseLlmPlan] re-validates every field against the live
+         * taxonomy/gazetteer, so an invented value dies before it can execute. The few-shots
+         * cover the three shapes the deterministic parsers can't: group-by, ordinal, pick.
+         */
+        val PLANNER_INSTRUCTIONS = """
+            Você converte uma pergunta sobre o BANCO DE DADOS de Honkai: Star Rail em um
+            plano de consulta JSON. Você NUNCA responde a pergunta — só monta o plano.
+
+            Tabelas: personagem (elemento, caminho, raridade 4-5, facção), cone (caminho,
+            raridade 3-5), reliquia, ornamento. Cada personagem tem uma build recomendada
+            com até 3 cones/relíquias/ornamentos em ordem (posição 1 = melhor).
+
+            Formato — omita (ou use null em) todo campo que a pergunta não pede:
+            {"entidade":"personagem|cone|reliquia|ornamento",
+             "elemento":"Fogo|Gelo|Físico|Imaginário|Quântico|Raio|Vento",
+             "caminho":"A Caça|A Preservação|A Destruição|A Erudição|A Harmonia|A Abundância|A Inexistência|A Recordação|A Euforia",
+             "raridade":3|4|5,
+             "faccao":"<nome da facção como escrito na pergunta>",
+             "personagem":"<nome próprio, quando a pergunta é sobre a build/itens DELE>",
+             "agrupar_por":"elemento|caminho|raridade|faccao",
+             "posicao":1|2|3,
+             "sortear":true|false,
+             "mostrar":"lista|build|efeito|contagem",
+             "quantidade":<número pedido>}
+
+            Regras:
+            - "de cada X" / "por X" / "agrupado por X" → "agrupar_por".
+            - "primeiro/segundo/terceiro melhor cone/relíquia/ornamento do <personagem>" →
+              "posicao" + "personagem".
+            - "um/algum/qualquer personagem de <filtro>" (sem nome próprio) → "sortear": true.
+            - Pergunta que NÃO é listar/contar/filtrar/sortear essas tabelas — kit,
+              habilidade, eidolon, lore, "quem é", conversa — → {"entidade": null}.
+            - NUNCA invente filtro que a pergunta não pede.
+
+            Exemplos:
+            - "me gera uma lista com 5 personagens de cada elemento" →
+              {"entidade":"personagem","agrupar_por":"elemento","quantidade":5,"mostrar":"lista"}
+            - "me da o efeito do terceiro melhor cone pro Phainon" →
+              {"entidade":"cone","personagem":"Phainon","posicao":3,"mostrar":"efeito"}
+            - "me da a build de um personagem de gelo" →
+              {"entidade":"personagem","elemento":"Gelo","sortear":true,"mostrar":"build"}
+            - "quantos cones 5 estrelas tem de cada caminho?" →
+              {"entidade":"cone","raridade":5,"agrupar_por":"caminho","mostrar":"contagem"}
+            - "lista os personagens 4 estrelas da caça" →
+              {"entidade":"personagem","caminho":"A Caça","raridade":4,"mostrar":"lista"}
+            - "escolhe alguém da Harmonia e me mostra o time dele" →
+              {"entidade":"personagem","caminho":"A Harmonia","sortear":true,"mostrar":"build"}
+            - "qual o kit da Robin?" → {"entidade":null}
+            - "quem é a Acheron?" → {"entidade":null}
+
+            Responda APENAS com o JSON do plano. Nada mais.
         """.trimIndent()
 
         /**

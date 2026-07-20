@@ -7,7 +7,7 @@ import org.springframework.ai.chat.messages.UserMessage
 import org.springframework.ai.chat.prompt.Prompt
 import org.springframework.ai.content.Media
 import org.springframework.ai.ollama.OllamaChatModel
-import org.springframework.ai.ollama.api.OllamaOptions
+import org.springframework.ai.ollama.api.OllamaChatOptions
 import org.springframework.core.io.ByteArrayResource
 import org.springframework.stereotype.Service
 import org.springframework.util.MimeType
@@ -73,17 +73,21 @@ class VisionService(
     }
 
     /**
-     * Vision options: low temperature (transcription, not prose) and a modest context —
-     * the prompt is short and image tokens are encoded separately, so the knowledge-path
-     * 16k window would only waste KV-cache memory here.
+     * Vision options: low temperature (transcription, not prose). numCtx is the SAME full
+     * window as every chat pass on purpose: num_ctx is a load-time parameter for Ollama,
+     * so when the vision model IS the chat model (the consolidated one-model setup) a
+     * smaller value here would force a full model reload on every image and again on the
+     * next chat call. Thinking is disabled like everywhere else — see OllamaAiService.
      */
-    private fun visionOptions(model: String): OllamaOptions =
-        OllamaOptions.builder()
+    private fun visionOptions(model: String): OllamaChatOptions =
+        OllamaChatOptions.builder()
+            .disableThinking()
             .model(model)
             .temperature(0.1)
-            .numCtx(4096)
+            .numCtx(properties.performance.numCtx)
             .numPredict(1024)
             .numThread(properties.performance.numThread)
+            .keepAlive(properties.performance.keepAlive)
             .build()
 
     companion object {
