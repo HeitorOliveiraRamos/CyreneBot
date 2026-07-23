@@ -179,10 +179,10 @@ class SrsNanokaHarvesterTest {
         // Kafka's base skillGrouping is single-id (same ability names) — the enhanced descriptions
         // live ONLY under .enhanced, so the fix must source skills from there.
         val kafka = load("srs_detail_kafka.json")
-        fun skillId(list: List<JsonNode>, tag: String) =
-            list.first { it.path("typeDescHash").asText() == tag }.path("id").asLong()
-        assertEquals(25635354L, skillId(SrsNanokaHarvester.srsCanonical(kafka, enhanced = true), "Perícia"))
-        assertEquals(874958L, skillId(SrsNanokaHarvester.srsCanonical(kafka, enhanced = false), "Perícia"))
+        fun skillId(buckets: List<List<JsonNode>>, tag: String) =
+            buckets.map { it.first() }.first { it.path("typeDescHash").asText() == tag }.path("id").asLong()
+        assertEquals(25635354L, skillId(SrsNanokaHarvester.srsCanonicalBuckets(kafka, enhanced = true), "Perícia"))
+        assertEquals(874958L, skillId(SrsNanokaHarvester.srsCanonicalBuckets(kafka, enhanced = false), "Perícia"))
         // End-to-end: the enhanced Skill description lands in pericia_descricao.
         val p = SrsNanokaHarvester.buildPersonagem(
             id = "1005",
@@ -225,6 +225,35 @@ class SrsNanokaHarvesterTest {
             nanDetail = load("nanoka_detail_1310.json"),
         )
         assertEquals("Fyrefly Type-IV: Pyrogenic Decimation", p.atqBasico.nome)
+    }
+
+    @Test
+    fun `extra ids in a skillGrouping bucket are merged in as bracketed sub-ability blocks`() {
+        // A base (non-enhanced) ability card that spans two skills — the shape behind the missing
+        // 「Estilo Livre Tohsaka」 (Rin), 「…Permissão…」 (Gilgamesh) text. Both must land in descricao.
+        val srsDetail = mapper.readTree(
+            """
+            {
+              "skills": [
+                {"id": 1, "typeDescHash": "Talento", "name": "Taumaturgia de Gemas",
+                 "descHash": "Base talento ganha <nobr>#1[i]</nobr> ponto.",
+                 "levelData": [{"level": 10, "params": [20]}]},
+                {"id": 2, "typeDescHash": "Talento", "name": "Estilo Livre Tohsaka",
+                 "descHash": "Ataque Extra causando <nobr>#1[i]%</nobr> do ATQ.",
+                 "levelData": [{"level": 10, "params": [3.0]}]}
+              ],
+              "skillGrouping": [[1, 2]]
+            }
+            """.trimIndent(),
+        )
+        val p = SrsNanokaHarvester.buildPersonagem(
+            id = "9001", nanMeta = mapper.createObjectNode(), srsEntry = null, srsDetail = srsDetail, nanDetail = null,
+        )
+        assertEquals("Taumaturgia de Gemas", p.talento.nome)
+        val d = p.talento.descricao!!
+        assertTrue(d.startsWith("Base talento ganha 20 ponto."), "primary block first: $d")
+        assertTrue(d.contains("「Estilo Livre Tohsaka」"), "extra block header missing: $d")
+        assertTrue(d.contains("Ataque Extra causando 300% do ATQ."), "extra block body missing: $d")
     }
 
     @Test

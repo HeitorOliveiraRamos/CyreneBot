@@ -291,37 +291,69 @@ class SrsNanokaHarvester(
             srs?.takeUnless { it.isBlank } ?: nan?.takeUnless { it.isBlank } ?: NamedText.EMPTY
 
         /**
+         * Merges one display group — a `skillGrouping` bucket, or all servant skills of one type —
+         * into a single ability. The first block gives the name + main description; every extra
+         * block is appended under its own 「name」 header, exactly the additional-ability cards HSR
+         * shows inline on a skill (Rin's 「Estilo Livre Tohsaka」, Gilgamesh's 「…Permissão…」,
+         * Cyrene/Aglaea's memosprite 「Ode…」 variants) — which the old one-id-per-bucket harvest
+         * silently dropped. [blocks] are already filled+stripped, in display order.
+         */
+        private fun mergeBlocks(blocks: List<NamedText>): NamedText {
+            val primary = blocks.firstOrNull() ?: return NamedText.EMPTY
+            val desc = buildString {
+                primary.descricao?.let { append(it) }
+                for (b in blocks.drop(1)) {
+                    val d = b.descricao?.takeIf { it.isNotBlank() } ?: continue
+                    if (isNotEmpty()) append("\n\n")
+                    b.nome?.takeIf { it.isNotBlank() }?.let { append("「").append(it).append("」\n") }
+                    append(d)
+                }
+            }.ifBlank { null }
+            return NamedText(primary.nome, desc)
+        }
+
+        /**
          * srs canonical skills as name/desc pairs, keyed by PT type tag ("Talento"…). Descriptions
          * are filled at the realistically achievable level ([ABILITY_CAP_PT]), not the eidolon/
-         * trace-boosted max. When [enhanced], the enhanced variant of each skill is used ([srsCanonical]).
+         * trace-boosted max, and a bucket's extra ids are merged in as 「name」 blocks ([mergeBlocks]).
+         * When [enhanced], the enhanced variant of each skill is used ([srsCanonicalBuckets]).
          */
         private fun srsAbilities(detail: JsonNode, enhanced: Boolean): Map<String, NamedText> =
-            srsCanonical(detail, enhanced).mapNotNull { sk ->
-                val tag = strip(sk.path("typeDescHash").asText(""))
+            srsCanonicalBuckets(detail, enhanced).mapNotNull { bucket ->
+                val tag = strip(bucket.firstOrNull()?.path("typeDescHash")?.asText("") ?: "")
                 if (tag.isBlank()) return@mapNotNull null
-                tag to NamedText(
-                    strip(sk.path("name").asText("")).ifBlank { null },
-                    fill(sk.path("descHash").asText(""), srsParamsCapped(sk.path("levelData"), ABILITY_CAP_PT[tag])).ifBlank { null },
-                )
+                val cap = ABILITY_CAP_PT[tag]
+                tag to mergeBlocks(bucket.map { sk ->
+                    NamedText(
+                        strip(sk.path("name").asText("")).ifBlank { null },
+                        fill(sk.path("descHash").asText(""), srsParamsCapped(sk.path("levelData"), cap)).ifBlank { null },
+                    )
+                })
             }.toMap()
 
         /**
-         * The 5 canonical skills keyed by id via `skillGrouping`. An enhanced-state character keeps
-         * its enhanced kit in a whole alternate detail under **`.enhanced`** (its own `skills` +
-         * `skillGrouping`) — Kafka/Silver Wolf keep the same ability NAMES there but with enhanced
-         * descriptions, so the base `skillGrouping` alone (single-id buckets) never exposes them.
-         * So for [enhanced] we source from `.enhanced` and still take the LAST id of each bucket
-         * (Firefly's `.enhanced` keeps base+enhanced pairs, enhanced last); base detail, first id,
-         * otherwise. Falls back to the raw skills list (deduped by name) when `skillGrouping` is absent.
+         * The canonical skills grouped by ability via `skillGrouping` — one bucket (list of skill
+         * nodes, in display order) per ability. A base bucket keeps ALL its ids: the first is the
+         * main skill, the rest are the inline 「name」 sub-ability blocks the game shows on the same
+         * card (Rin's 「Estilo Livre Tohsaka」, Gilgamesh's 「…Permissão…」). An enhanced-state
+         * character instead keeps its enhanced kit in a whole alternate detail under **`.enhanced`**
+         * (its own `skills` + `skillGrouping`) — Kafka/Silver Wolf reuse the base ability NAMES there
+         * with enhanced descriptions — so for [enhanced] we source from `.enhanced` and take only the
+         * LAST id of each bucket (Firefly's `.enhanced` keeps base+enhanced pairs, enhanced last),
+         * not the extra-block merge. Falls back to name-deduped skills (each its own 1-node bucket)
+         * when `skillGrouping` is absent.
          */
-        internal fun srsCanonical(detail: JsonNode, enhanced: Boolean): List<JsonNode> {
+        internal fun srsCanonicalBuckets(detail: JsonNode, enhanced: Boolean): List<List<JsonNode>> {
             val source = if (enhanced && detail.path("enhanced").path("skills").let { it.isArray && !it.isEmpty })
                 detail.path("enhanced") else detail
             val skills = source.path("skills")
             val byId = skills.associateBy { it.path("id").asLong() }
             val grouping = source.path("skillGrouping")
-            if (!grouping.isArray || grouping.isEmpty) return skills.distinctBy { it.path("name").asText("") }
-            return grouping.mapNotNull { group -> byId[group.path(if (enhanced) group.size() - 1 else 0).asLong()] }
+            if (!grouping.isArray || grouping.isEmpty) return skills.distinctBy { it.path("name").asText("") }.map { listOf(it) }
+            return grouping.map { group ->
+                if (enhanced) listOfNotNull(byId[group.path(group.size() - 1).asLong()])
+                else group.mapNotNull { byId[it.asLong()] }
+            }
         }
 
         /**
@@ -348,22 +380,38 @@ class SrsNanokaHarvester(
 
         /**
          * srs memosprite Skill/Talent (Recordação only) from `.servant.skills`, keyed "skill"/
-         * "talent". Servant skills use their own field names (`typeDesc`, `skillDesc`) and carry
-         * the PT type label directly, so match on that rather than position. [] for non-Recordação.
+         * "talent". Servant skills use their own field names (`typeDesc`, `skillDesc`) and are
+         * grouped by `.servant.skillGrouping` (bucket order = display order), so — like the main
+         * abilities — a bucket's extra ids are merged in as 「name」 blocks ([mergeBlocks]): Cyrene's
+         * memosprite Skill carries 16 per-ally 「Ode…」 variants, Aglaea's Talent three. Falls back to
+         * grouping-by-type (array order) when a servant has no skillGrouping. [] for non-Recordação.
          */
         private fun srsMemosprite(detail: JsonNode): Map<String, NamedText> {
-            val skills = children(detail.path("servant").path("skills"))
+            val servant = detail.path("servant")
+            val skills = children(servant.path("skills"))
             if (skills.isEmpty()) return emptyMap()
-            fun byType(type: String): NamedText? = skills.firstOrNull { strip(it.path("typeDesc").asText("")) == type }?.let { sk ->
-                NamedText(
-                    strip(sk.path("name").asText("")).ifBlank { null },
-                    fill(sk.path("skillDesc").asText(""), srsParamsCapped(sk.path("levelData"), MEMO_CAP)).ifBlank { null },
-                )
+            val byId = servant.path("skills").associateBy { it.path("id").asLong() }
+            val grouping = servant.path("skillGrouping")
+            val buckets: List<List<JsonNode>> =
+                if (grouping.isArray && !grouping.isEmpty)
+                    children(grouping).map { g -> children(g).mapNotNull { byId[it.asLong()] } }
+                else skills.groupBy { strip(it.path("typeDesc").asText("")) }.values.toList()
+            val out = LinkedHashMap<String, NamedText>()
+            for (bucket in buckets) {
+                val key = when (strip(bucket.firstOrNull()?.path("typeDesc")?.asText("") ?: "")) {
+                    "Perícia do Memoespírito" -> "skill"
+                    "Talento do Memoespírito" -> "talent"
+                    else -> continue
+                }
+                if (out.containsKey(key)) continue
+                out[key] = mergeBlocks(bucket.map { sk ->
+                    NamedText(
+                        strip(sk.path("name").asText("")).ifBlank { null },
+                        fill(sk.path("skillDesc").asText(""), srsParamsCapped(sk.path("levelData"), MEMO_CAP)).ifBlank { null },
+                    )
+                })
             }
-            return buildMap {
-                byType("Perícia do Memoespírito")?.let { put("skill", it) }
-                byType("Talento do Memoespírito")?.let { put("talent", it) }
-            }
+            return out
         }
 
         /** nanoka memosprite skills keyed by type_name ("Memosprite Skill"/"Memosprite Talent"). */
