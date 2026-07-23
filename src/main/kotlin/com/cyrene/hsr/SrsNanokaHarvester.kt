@@ -10,8 +10,10 @@ import com.cyrene.knowledge.StarRailStationIngestionSource.Companion.hashPath
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.cyrene.knowledge.NanokaIngestionSource.Companion.maxLevelParams as nanMaxLevel
+import com.cyrene.knowledge.NanokaIngestionSource.Companion.minLevelParams as nanMinLevel
 import com.cyrene.knowledge.NanokaIngestionSource.Companion.paramList as nanParams
 import com.cyrene.knowledge.StarRailStationIngestionSource.Companion.maxLevelParams as srsMaxLevel
+import com.cyrene.knowledge.StarRailStationIngestionSource.Companion.minLevelParams as srsMinLevel
 import com.cyrene.knowledge.StarRailStationIngestionSource.Companion.paramList as srsParams
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
@@ -547,28 +549,37 @@ class SrsNanokaHarvester(
 
         // ---------------- light cones ---------------- //
 
+        // Effect text is level-locked by rarity so it reads like what a normal player owns:
+        // 5★ cones at superimpose 1 (the pull-and-forget baseline), 4★/3★ at superimpose 5
+        // (cheap to max from the shop/battle pass). The `level`/`levelData` "level" IS superimpose.
         internal fun buildSrsCone(coneGameId: String, detail: JsonNode): ConeDeLuz {
             val skill = detail.path("skill")
+            val rarity = detail.path("rarity").asInt(0).takeIf { it > 0 }
+            val params = if (rarity == 5) srsMinLevel(skill.path("levelData")) else srsMaxLevel(skill.path("levelData"))
             return ConeDeLuz(
                 coneGameId = coneGameId,
                 nome = strip(detail.path("name").asText("")),
                 caminho = strip(detail.path("baseType").path("name").asText("")).ifBlank { null },
-                raridade = detail.path("rarity").asInt(0).takeIf { it > 0 },
+                raridade = rarity,
                 efeitoNome = strip(skill.path("name").asText("")).ifBlank { null },
-                efeitoDescricao = fill(skill.path("descHash").asText(""), srsMaxLevel(skill.path("levelData"))).ifBlank { null },
+                efeitoDescricao = fill(skill.path("descHash").asText(""), params).ifBlank { null },
                 descricao = fill(detail.path("descHash").asText(""), emptyList()).ifBlank { null },
             )
         }
 
         internal fun buildNanCone(coneGameId: String, meta: JsonNode, detail: JsonNode?): ConeDeLuz {
             val ref = detail?.path("refinements")
+            val rarity = RARITY_DIGIT.find(meta.path("rank").asText(""))?.value?.toIntOrNull()
             return ConeDeLuz(
                 coneGameId = coneGameId,
                 nome = strip(meta.path("en").asText("")),
                 caminho = meta.path("baseType").asText("").ifBlank { null }?.let { PATH_EN[it] ?: it },
-                raridade = RARITY_DIGIT.find(meta.path("rank").asText(""))?.value?.toIntOrNull(),
+                raridade = rarity,
                 efeitoNome = ref?.path("name")?.asText("")?.let(::strip)?.ifBlank { null },
-                efeitoDescricao = ref?.let { fill(it.path("desc").asText(""), nanMaxLevel(it.path("level"))).ifBlank { null } },
+                efeitoDescricao = ref?.let {
+                    val params = if (rarity == 5) nanMinLevel(it.path("level")) else nanMaxLevel(it.path("level"))
+                    fill(it.path("desc").asText(""), params).ifBlank { null }
+                },
                 descricao = null,
             )
         }

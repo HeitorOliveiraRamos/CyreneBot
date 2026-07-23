@@ -18,8 +18,9 @@ import java.util.UUID
  * The full answer lives in Postgres (`resposta_paginada`), keyed by a short random id
  * embedded in the button custom id (`pg:<key>:<targetIndex>`), so buttons keep working
  * across restarts. Only the TEXT is stored — pages are re-derived on every click, which
- * means old messages survive splitter tweaks (the listener clamps the index if boundaries
- * moved). The buttons are stateless: every edit re-attaches buttons pointing at the
+ * means old messages survive splitter tweaks (the listener wraps/folds the index if
+ * boundaries moved). ◀ on the first page wraps to the last, ▶ on the last wraps to the
+ * first. The buttons are stateless: every edit re-attaches buttons pointing at the
  * neighbor indices, so there is no cursor to race on. DMs skip pagination entirely and
  * keep the multi-message reply that stays readable forever.
  *
@@ -93,9 +94,10 @@ class MessagePaginator(private val jdbc: JdbcTemplate) {
     fun render(pages: List<String>, index: Int): String =
         "${pages[index]}\n-# (${index + 1}/${pages.size})"
 
-    fun buttons(key: String, index: Int, total: Int): List<Button> = listOf(
-        Button.secondary("pg:$key:${index - 1}", "◀").withDisabled(index == 0),
-        Button.secondary("pg:$key:${index + 1}", "▶").withDisabled(index == total - 1),
+    // Targets can be -1 / total on the end pages; the listener's floorMod wraps them around.
+    fun buttons(key: String, index: Int): List<Button> = listOf(
+        Button.secondary("pg:$key:${index - 1}", "◀"),
+        Button.secondary("pg:$key:${index + 1}", "▶"),
     )
 
     /** Paragraph-level blocks; fenced code blocks are kept whole even across blank lines. */
@@ -165,10 +167,11 @@ class PageButtonListener(private val paginator: MessagePaginator) : ListenerAdap
             event.reply(BotMessages.PAGES_EXPIRED).setEphemeral(true).queue()
             return
         }
-        // Pages are re-derived per click; clamp in case a splitter tweak moved boundaries.
-        val index = requested.coerceIn(0, pages.size - 1)
+        // Pages are re-derived per click; floorMod wraps ◀/▶ past the ends and folds any
+        // stale out-of-range index (splitter tweak moved boundaries) back into range.
+        val index = Math.floorMod(requested, pages.size)
         event.editMessage(paginator.render(pages, index))
-            .setComponents(ActionRow.of(paginator.buttons(key, index, pages.size)))
+            .setComponents(ActionRow.of(paginator.buttons(key, index)))
             .queue()
     }
 }

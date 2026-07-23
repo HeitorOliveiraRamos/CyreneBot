@@ -84,6 +84,13 @@ class StarRailStationIngestionSource(
             return paramList(top.path("params"))
         }
 
+        /** `params` of the lowest-`level` entry (e.g. a light cone's superimpose 1). */
+        internal fun minLevelParams(levelData: JsonNode): List<Double> {
+            if (!levelData.isArray || levelData.isEmpty) return emptyList()
+            val bottom = levelData.minByOrNull { it.path("level").asInt(0) } ?: return emptyList()
+            return paramList(bottom.path("params"))
+        }
+
         /**
          * The 5 canonical abilities: the first skill id of each `skillGrouping` bucket
          * (Basic/Skill/Ultimate/Talent/Technique), so enhanced-ult and technique-attack

@@ -41,7 +41,7 @@ class DiscordMessageSender(
             if (pages.size > 1) {
                 val key = paginator.register(safe)
                 original.reply(paginator.render(pages, 0))
-                    .setComponents(ActionRow.of(paginator.buttons(key, 0, pages.size)))
+                    .setComponents(ActionRow.of(paginator.buttons(key, 0)))
                     // Cache the full answer, not page 1: a user replying to this message
                     // should hand the model the whole text as context, not the visible slice.
                     .queue { sent ->
@@ -69,7 +69,7 @@ class DiscordMessageSender(
             if (pages.size > 1) {
                 val key = paginator.register(safe)
                 hook.sendMessage(paginator.render(pages, 0))
-                    .setComponents(ActionRow.of(paginator.buttons(key, 0, pages.size)))
+                    .setComponents(ActionRow.of(paginator.buttons(key, 0)))
                     .queue { sent ->
                         paginator.linkMessage(key, sent.id)
                         botReplyCache.put(sent, safe)

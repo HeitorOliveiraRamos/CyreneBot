@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -121,12 +122,27 @@ class SrsNanokaHarvesterTest {
         assertEquals(5, cone.raridade)
         assertTrue(cone.caminho!!.contains("Recordação"), "caminho: ${cone.caminho}")
         assertEquals("Estabelecimento", cone.efeitoNome)
-        assertTrue(cone.efeitoDescricao!!.isNotBlank())
+        // 5★ → superimpose 1: VEL base +12 (S1), NOT +20 (S5).
+        assertTrue(cone.efeitoDescricao!!.contains("12"), "S1 effect: ${cone.efeitoDescricao}")
+        assertFalse(cone.efeitoDescricao!!.contains("20"), "should not be S5: ${cone.efeitoDescricao}")
         assertTrue(cone.descricao!!.isNotBlank(), "descricao (lore) should be set")
 
         // Signature join: Aglaea's #1 recommended cone is this 5★ cone, so the harvest links them.
         val topCone = load("nanoka_detail_1402.json").path("lightcones").first().asText()
         assertEquals(cone.coneGameId, topCone)
+    }
+
+    @Test
+    fun `4-star cone uses superimpose 5, not superimpose 1`() {
+        val json = mapper.readTree(
+            """{"name":"C","rarity":4,"baseType":{"name":"Destruição"},
+               "skill":{"name":"E","descHash":"Aumenta o Dano em #1[i]%.",
+                        "levelData":[{"level":1,"params":[0.24]},{"level":5,"params":[0.48]}]}}""",
+        )
+        val cone = SrsNanokaHarvester.buildSrsCone("21001", json)
+        assertEquals(4, cone.raridade)
+        assertTrue(cone.efeitoDescricao!!.contains("48"), "S5 effect: ${cone.efeitoDescricao}") // 0.48 → 48%
+        assertFalse(cone.efeitoDescricao!!.contains("24"), "should not be S1: ${cone.efeitoDescricao}")
     }
 
     // -------------------- recommended builds -------------------- //

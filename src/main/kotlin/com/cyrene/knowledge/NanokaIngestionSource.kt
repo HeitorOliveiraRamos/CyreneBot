@@ -78,6 +78,13 @@ class NanokaIngestionSource(
             return paramList(levelNode.path(maxKey).path("param_list"))
         }
 
+        /** `param_list` of the lowest numeric key (e.g. a light cone's superimpose 1). */
+        internal fun minLevelParams(levelNode: JsonNode): List<Double> {
+            if (!levelNode.isObject || levelNode.isEmpty) return emptyList()
+            val minKey = levelNode.fieldNames().asSequence().minByOrNull { it.toIntOrNull() ?: Int.MAX_VALUE } ?: return emptyList()
+            return paramList(levelNode.path(minKey).path("param_list"))
+        }
+
         /**
          * Substitutes `#N[fmt]%` placeholders with values from [params] and strips HSR markup.
          * A trailing `%` means the param is a ratio shown as a percent (×100). Unmatched
